@@ -48,20 +48,20 @@ type Broker interface {
 }
 
 // registry holds all registered broker constructors
-var registry = map[string]func(headless bool) (Broker, error){}
+var registry = map[string]func(headless bool, verbose bool) (Broker, error){}
 
 // RegisterBroker adds a broker constructor to the registry
-func RegisterBroker(name string, constructor func(headless bool) (Broker, error)) {
+func RegisterBroker(name string, constructor func(headless bool, verbose bool) (Broker, error)) {
 	registry[name] = constructor
 }
 
 // NewBroker creates a broker instance by name
-func NewBroker(name string, headless bool) (Broker, error) {
+func NewBroker(name string, headless bool, verbose bool) (Broker, error) {
 	constructor, ok := registry[name]
 	if !ok {
 		return nil, fmt.Errorf("unknown broker: %s", name)
 	}
-	return constructor(headless)
+	return constructor(headless, verbose)
 }
 
 // ListBrokers returns all registered broker names in sorted order

@@ -16,8 +16,8 @@ import (
 )
 
 func init() {
-	RegisterBroker("zerodha", func(headless bool) (Broker, error) {
-		return NewZerodhaBroker(headless)
+	RegisterBroker("zerodha", func(headless bool, verbose bool) (Broker, error) {
+		return NewZerodhaBroker(headless, verbose)
 	})
 }
 
@@ -26,11 +26,12 @@ type ZerodhaBroker struct {
 	browser       *rod.Browser
 	page          *rod.Page
 	headless      bool
+	verbose       bool
 	accountNumber string
 }
 
 // NewZerodhaBroker creates a new Zerodha broker instance
-func NewZerodhaBroker(headless bool) (*ZerodhaBroker, error) {
+func NewZerodhaBroker(headless bool, verbose bool) (*ZerodhaBroker, error) {
 	url := launcher.New().
 		Headless(headless).
 		MustLaunch()
@@ -38,7 +39,15 @@ func NewZerodhaBroker(headless bool) (*ZerodhaBroker, error) {
 	return &ZerodhaBroker{
 		browser:  browser,
 		headless: headless,
+		verbose:  verbose,
 	}, nil
+}
+
+// debugLog prints only when verbose mode is enabled
+func (z *ZerodhaBroker) debugLog(format string, args ...interface{}) {
+	if z.verbose {
+		log.Printf(format, args...)
+	}
 }
 
 // Name returns the broker identifier
@@ -151,14 +160,14 @@ func (z *ZerodhaBroker) DownloadTradesForFY(fy FinancialYear, downloadDir string
 
 	// Open the date picker via JS — Rod's MustClick() hangs on SVG elements
 	// because it can't resolve their click geometry reliably.
-	log.Println("[debug] clicking calendar icon")
+	z.debugLog("clicking .mx-input-wrapper to open date picker")
 	z.page.MustEval(`() => document.querySelector('.mx-input-wrapper').click()`)
 
-	log.Println("[debug] waiting for popup to be visible")
+	z.debugLog("waiting for date picker popup")
 	if err := z.page.MustElement(".mx-datepicker-popup").WaitVisible(); err != nil {
 		return nil, fmt.Errorf("date picker did not open: %w", err)
 	}
-	log.Println("[debug] popup open")
+	z.debugLog("date picker open")
 
 	// Use today as end date for current FY — the FY end (Mar 31) may be in the
 	// future and the calendar won't allow clicking future dates.
@@ -168,17 +177,17 @@ func (z *ZerodhaBroker) DownloadTradesForFY(fy FinancialYear, downloadDir string
 		endDate = time.Now()
 	}
 
-	log.Printf("[debug] selecting start date %s", startDate.Format("2006-01-02"))
+	z.debugLog("selecting start date %s", startDate.Format("2006-01-02"))
 	if err := z.selectCalendarDate(1, startDate); err != nil {
 		return nil, fmt.Errorf("selecting start date: %w", err)
 	}
-	log.Printf("[debug] selecting end date %s", endDate.Format("2006-01-02"))
+	z.debugLog("selecting end date %s", endDate.Format("2006-01-02"))
 	if err := z.selectCalendarDate(2, endDate); err != nil {
 		return nil, fmt.Errorf("selecting end date: %w", err)
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	log.Println("[debug] clicking search button")
+	z.debugLog("clicking search button")
 	z.page.MustElement("div.one span").MustClick()
 	time.Sleep(2 * time.Second)
 
@@ -212,7 +221,7 @@ func (z *ZerodhaBroker) DownloadTradesForFY(fy FinancialYear, downloadDir string
 func (z *ZerodhaBroker) selectCalendarDate(pane int, date time.Time) error {
 	paneSelector := fmt.Sprintf("div.mx-range-wrapper > div:nth-of-type(%d)", pane)
 
-	log.Printf("[debug] pane %d: clicking year label", pane)
+	z.debugLog("pane %d: selecting year %d", pane, date.Year())
 	z.page.MustElement(paneSelector + " a.mx-current-year").MustClick()
 	time.Sleep(300 * time.Millisecond)
 

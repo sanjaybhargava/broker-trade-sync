@@ -14,14 +14,16 @@ import (
 	"syscall"
 
 	"github.com/joho/godotenv"
+	"golang.org/x/term"
 
 	"broker-trade-sync/brokers"
 )
 
 var (
-	headless = flag.Bool("headless", true, "Run browser in headless mode")
-	verbose  = flag.Bool("verbose", false, "Enable verbose logging")
-	reset    = flag.Bool("reset", false, "Clear saved credentials and re-run setup")
+	headless      = flag.Bool("headless", true, "Run browser in headless mode")
+	verbose       = flag.Bool("verbose", false, "Enable verbose logging")
+	reset         = flag.Bool("reset", false, "Clear saved credentials and re-run setup")
+	brokerOverride = flag.String("broker", "", "Override broker from .env (e.g. zerodha)")
 )
 
 const envFile = ".env"
@@ -50,6 +52,9 @@ func main() {
 	}
 
 	brokerName := os.Getenv("BROKER")
+	if *brokerOverride != "" {
+		brokerName = *brokerOverride
+	}
 	username := os.Getenv(strings.ToUpper(brokerName) + "_USERNAME")
 	password := os.Getenv(strings.ToUpper(brokerName) + "_PASSWORD")
 
@@ -68,7 +73,7 @@ func main() {
 	}
 
 	// Initialize broker
-	broker, err := brokers.NewBroker(brokerName, *headless)
+	broker, err := brokers.NewBroker(brokerName, *headless, *verbose)
 	if err != nil {
 		log.Fatalf("Failed to initialize broker: %v", err)
 	}
@@ -193,10 +198,14 @@ func runFirstRunSetup() error {
 	username, _ := reader.ReadString('\n')
 	username = strings.TrimSpace(username)
 
-	// Prompt password (visible input)
+	// Prompt password with hidden input so it doesn't appear on screen
 	fmt.Print("Password: ")
-	password, _ := reader.ReadString('\n')
-	password = strings.TrimSpace(password)
+	passwordBytes, err := term.ReadPassword(int(syscall.Stdin))
+	fmt.Println()
+	if err != nil {
+		return fmt.Errorf("failed to read password: %w", err)
+	}
+	password := strings.TrimSpace(string(passwordBytes))
 
 	// Write .env
 	envContent := fmt.Sprintf("BROKER=%s\n%s_USERNAME=%s\n%s_PASSWORD=%s\n",
