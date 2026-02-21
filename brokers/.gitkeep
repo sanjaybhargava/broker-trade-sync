@@ -1,0 +1,2 @@
+# Reserved for future multi-package broker implementations
+# Currently, broker implementations are in the root package for simplicity
