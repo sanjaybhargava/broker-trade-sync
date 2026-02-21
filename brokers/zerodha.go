@@ -101,6 +101,9 @@ func (z *ZerodhaBroker) Login(username, password, authCode string) error {
 		if scanner.Scan() {
 			authCode = strings.TrimSpace(scanner.Text())
 		}
+		if authCode == "" {
+			return fmt.Errorf("no auth code entered — re-run and type your TOTP when prompted")
+		}
 	}
 
 	// Re-fetch the TOTP element just before typing — the element reference can
@@ -131,10 +134,10 @@ func (z *ZerodhaBroker) Login(username, password, authCode string) error {
 // NavigateToTradeBook navigates to the trade history section
 func (z *ZerodhaBroker) NavigateToTradeBook() error {
 	z.page.MustNavigate("https://console.zerodha.com/reports/tradebook")
-	z.page.MustWaitLoad()
-	// Wait for the calendar icon to be visible — confirms Vue datepicker has mounted.
-	// The icon is always visible on the page (not inside the popup), so this is reliable.
-	if _, err := z.page.Timeout(15 * time.Second).Element("svg.mx-calendar-icon"); err != nil {
+	// Wait for the calendar icon — confirms the Vue datepicker has mounted.
+	// Skipping MustWaitLoad(): the tradebook is a SPA where the load event is
+	// unreliable, and the icon appearing is the real readiness signal.
+	if _, err := z.page.Timeout(20 * time.Second).Element("svg.mx-calendar-icon"); err != nil {
 		return fmt.Errorf("tradebook date picker did not appear: %w", err)
 	}
 	return nil
