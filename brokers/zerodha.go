@@ -149,7 +149,7 @@ func (z *ZerodhaBroker) DownloadTradesForFY(fy FinancialYear, downloadDir string
 	// Open the date picker via JS — Rod's MustClick() hangs on SVG elements
 	// because it can't resolve their click geometry reliably.
 	log.Println("[debug] clicking calendar icon")
-	z.page.MustEval(`document.querySelector('svg.mx-calendar-icon').dispatchEvent(new MouseEvent('click', {bubbles:true}))`)
+	z.page.MustEval(`() => document.querySelector('.mx-input-wrapper').click()`)
 
 	log.Println("[debug] waiting for popup to be visible")
 	if err := z.page.MustElement(".mx-datepicker-popup").WaitVisible(); err != nil {
