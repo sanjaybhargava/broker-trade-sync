@@ -291,20 +291,59 @@ if err != nil {
 
 ### URLs
 
-- Login: `https://console.zerodha.com/`
-- Trade book is accessible after login from console dashboard
+- Login entry point: `https://console.zerodha.com/` — may show a "Login with Kite" button or redirect directly to Kite login
+- Kite login (actual form): `https://kite.zerodha.com/connect/login?api_key=console&sess_id=...`
+- Trade book: `https://console.zerodha.com/reports/tradebook`
 
-### Page Elements (may need updating)
+### Account Number
 
-- Login form has username, password fields
-- TOTP is entered on second step after password
-- Trade book has date range selectors and CSV export button
+The Zerodha client ID (e.g. `BT2632`) is the same as the username. No separate extraction needed — stored from `Login()` parameters.
+
+### Verified CSS Selectors (from recorded session)
+
+**Login flow (Kite login page)**
+- Username field: `#userid`
+- Password field: `#password`
+- Submit button: `button[type='submit']`
+- TOTP field (second step): `[label='External TOTP']` — note: custom `label` attribute, NOT `aria-label`
+  - `type="number"`, `id="userid"` (reused), `maxlength="6"`
+  - Zerodha **auto-submits** when 6 digits are entered — use `rod.Try()` around `MustInput` to handle context cancel mid-navigation
+
+**Login button on console landing page (if present)**
+- Selector: `button.btn-blue`
+- Must set up `MustWaitNavigation()` BEFORE clicking — button navigates to Kite login page
+
+**Trade book page**
+- Date range input (opens picker): `div.three input`
+- Clear date selection: `span.mx-clear-wrapper`
+- Preset buttons (visible after opening picker):
+  - Current FY: `button:nth-of-type(4)` (aria-label "current FY")
+  - Previous FY: `button:nth-of-type(3)` (aria-label "prev. FY")
+- Search/filter button: `div.one span`
+- CSV download link: `div.table-section a:nth-of-type(2)` (aria-label "CSV")
+
+**Date picker — manual calendar navigation (for FYs older than prev FY)**
+
+The date picker is a vue2-datepicker range picker with left (From) and right (To) calendar panes.
+
+Left pane selector: `div.mx-range-wrapper > div:nth-of-type(1)`
+Right pane selector: `div.mx-range-wrapper > div:nth-of-type(2)`
+
+For each pane:
+1. Click year label link: `{pane} a:nth-of-type(6)` — opens year picker panel
+2. Year panel: `div.mx-calendar-panel-year .mx-panel-year span` — shows ~10 years; click matching text
+3. If target year not visible, click previous decade: `div.mx-calendar-panel-year a.mx-icon-last-year`
+4. Month panel (appears after year click): `div.mx-calendar-panel-month .mx-panel-month > span:nth-of-type(N)` where N = month number (1=Jan, 4=Apr, 3=Mar)
+5. Day cells: `{pane} table tbody td.cur-month` — iterate and click matching day number
 
 ### Known Behaviors
 
-- Session may timeout; handle re-login if needed
-- CSV download may take a few seconds for large date ranges
-- Rate limiting possible; add delays between requests if needed
+- Console landing page may or may not show "Login with Kite" button — code handles both cases with a 5s timeout
+- TOTP auto-submits on 6th digit entry causing navigation mid-`MustInput` — wrap with `rod.Try()`
+- `WaitNavigation()` must be set up BEFORE any click that triggers navigation
+- CSV link (`div.table-section a:nth-of-type(2)`) is absent when no trades exist for the selected period — treat as RecordCount=0
+- Downloads are intercepted via `browser.WaitDownload(dir)` before clicking CSV; poll for `.crdownload` removal to confirm completion
+- Session may timeout on long runs; handle re-login if needed
 
 ## Adding a New Broker
 
