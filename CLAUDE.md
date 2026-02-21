@@ -61,9 +61,10 @@ type Broker interface {
     // Name returns the broker identifier (e.g., "zerodha")
     Name() string
 
-    // Login opens browser, navigates to login page, authenticates with 2FA
+    // Login opens browser, navigates to login page, prompts user for auth code at runtime
+    // authCode supports any method: TOTP, SMS OTP, email OTP
     // Returns error if login fails
-    Login(username, password, totpSecret string) error
+    Login(username, password, authCode string) error
 
     // NavigateToTradeBook navigates to the trade history/book section
     NavigateToTradeBook() error
@@ -123,8 +124,8 @@ Example: `ZX1234_20230401_20240331.csv`
 // go.mod essentials
 require (
     github.com/go-rod/rod v0.116.x      // Browser automation
-    github.com/pquerna/otp v1.4.x       // TOTP generation for 2FA
     github.com/joho/godotenv v1.5.x     // .env file loading
+    golang.org/x/term v0.x.x            // Hidden password input
 )
 ```
 
@@ -133,12 +134,43 @@ require (
 `.env` file format:
 
 ```env
+BROKER=zerodha
 ZERODHA_USERNAME=your_username
 ZERODHA_PASSWORD=your_password
-ZERODHA_TOTP_SECRET=your_totp_secret_key
 ```
 
-The TOTP secret is the base32 secret key from Zerodha's 2FA setup (not the QR code, but the manual entry key).
+### First Run Setup (no `.env` present)
+
+If `.env` does not exist when the bot starts, enter interactive setup mode:
+
+1. Scan the `brokers/` folder to discover all available broker implementations
+2. Display a numbered menu, e.g.:
+   ```
+   Select your broker:
+     1. Zerodha
+     2. Groww
+
+   If your broker is not listed, email support@bharosaclub.com with your broker name to request it be added. We will confirm once it is available.
+
+   Enter number:
+   ```
+3. Read the user's selection and resolve it to the broker identifier
+4. Prompt: `Username:` — read username from stdin
+5. Prompt: `Password:` — read password with echo disabled (use `golang.org/x/term` or equivalent)
+6. Write all values to `.env` automatically
+7. Proceed with the normal run
+
+### Subsequent Runs
+
+If `.env` exists, load it silently via `godotenv` and proceed without any prompts.
+
+### `--reset` Flag
+
+When the user passes `--reset`:
+
+1. Delete the existing `.env` file
+2. Re-trigger the interactive first-run setup as described above
+3. Proceed with a fresh run using the new credentials
 
 ## Coding Conventions
 
@@ -179,7 +211,7 @@ if err != nil {
 2. Create folder structure as specified
 3. Create `.env.example` with placeholder values
 4. Add `.gitignore` for `.env`, `downloads/`, and Go build artifacts
-5. Install dependencies: `go get github.com/go-rod/rod github.com/pquerna/otp github.com/joho/godotenv`
+5. Install dependencies: `go get github.com/go-rod/rod github.com/joho/godotenv golang.org/x/term`
 
 ### Phase 2: Core Interface
 
@@ -195,8 +227,8 @@ if err != nil {
 2. Implement `Login()`:
    - Navigate to `https://console.zerodha.com/`
    - Enter username, password
-   - Generate TOTP using `pquerna/otp` library
-   - Submit TOTP for 2FA
+   - Prompt user at runtime: `Enter auth code (TOTP/SMS/email OTP):` — read from stdin
+   - Submit auth code for 2FA
    - Wait for dashboard load
 3. Implement `NavigateToTradeBook()`:
    - Navigate to trade book/history section
@@ -215,9 +247,11 @@ if err != nil {
 
 1. Create `main.go` with:
    - Import the `brokers` package
-   - Load `.env` credentials
-   - Initialize Zerodha broker via `brokers.NewZerodhaBroker()`
-   - Execute login flow
+   - If `--reset` flag is set, delete `.env` before loading
+   - If `.env` does not exist, run interactive setup: show broker menu, prompt for username and password, then write `.env`
+   - Load `.env` silently via `godotenv`
+   - Initialize the selected broker (e.g. `brokers.NewZerodhaBroker()`)
+   - Execute login flow (broker will prompt for auth code at runtime)
    - Determine download strategy (first run vs subsequent)
    - Execute downloads
    - Print summary report
@@ -234,7 +268,7 @@ if err != nil {
 
 ### Phase 6: Polish
 
-1. Add CLI flags: `--headless`, `--broker`, `--verbose`
+1. Add CLI flags: `--headless`, `--broker`, `--verbose`, `--reset`
 2. Add proper logging levels
 3. Add graceful interrupt handling (Ctrl+C)
 4. Test edge cases: no trades, partial years, network errors
@@ -249,8 +283,8 @@ if err != nil {
 ## Security Notes
 
 - NEVER commit `.env` or credentials
-- NEVER log passwords or TOTP secrets
-- Store TOTP secret securely (it's equivalent to a password)
+- NEVER log passwords or auth codes
+- Auth codes are always prompted at runtime and never stored
 - Consider adding `.env` to `.gitignore` in Phase 1
 
 ## Zerodha-Specific Details
@@ -285,7 +319,7 @@ if err != nil {
 ## Commands Reference
 
 ```bash
-# Run the bot
+# Run the bot (first run: prompts for credentials if no .env)
 go run .
 
 # Build binary
@@ -296,11 +330,15 @@ go run . --headless=false
 
 # Specify broker (future)
 go run . --broker=zerodha
+
+# Clear saved credentials and re-run setup
+go run . --reset
 ```
 
 ## Troubleshooting
 
-- **Login fails**: Check credentials in `.env`, verify TOTP secret is correct
+- **Login fails**: Check credentials in `.env`; verify the auth code entered at runtime is correct and not expired; use `--reset` to re-enter credentials
 - **Download hangs**: Run with `--headless=false` to see browser state
 - **No records found**: Verify date range and account has trading history
 - **File already exists**: This is expected; bot is idempotent
+- **Want to change broker/credentials**: Run with `--reset` to clear `.env` and re-trigger setup
