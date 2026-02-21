@@ -10,7 +10,7 @@ downloads/*.csv
 *.dll
 *.so
 *.dylib
-zerodha-trade-sync
+broker-trade-sync
 
 # Test binary
 *.test
