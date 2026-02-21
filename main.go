@@ -6,13 +6,14 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/joho/godotenv"
-	"golang.org/x/term"
 
 	"broker-trade-sync/brokers"
 )
@@ -68,6 +69,16 @@ func main() {
 		log.Fatalf("Failed to initialize broker: %v", err)
 	}
 	defer broker.Close()
+
+	// Handle Ctrl+C: close browser and exit cleanly
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		fmt.Println("\nInterrupted. Closing browser...")
+		broker.Close()
+		os.Exit(1)
+	}()
 
 	// Login (broker prompts for auth code at runtime)
 	log.Printf("Logging into %s...", broker.Name())
@@ -178,14 +189,10 @@ func runFirstRunSetup() error {
 	username, _ := reader.ReadString('\n')
 	username = strings.TrimSpace(username)
 
-	// Prompt password (hidden input)
+	// Prompt password (visible input)
 	fmt.Print("Password: ")
-	passwordBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Println()
-	if err != nil {
-		return fmt.Errorf("failed to read password: %w", err)
-	}
-	password := string(passwordBytes)
+	password, _ := reader.ReadString('\n')
+	password = strings.TrimSpace(password)
 
 	// Write .env
 	envContent := fmt.Sprintf("BROKER=%s\n%s_USERNAME=%s\n%s_PASSWORD=%s\n",
