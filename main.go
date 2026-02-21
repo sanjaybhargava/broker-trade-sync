@@ -57,8 +57,12 @@ func main() {
 		log.Fatal("Missing credentials in .env. Run with --reset to reconfigure.")
 	}
 
-	// Ensure downloads directory exists
-	downloadDir := filepath.Join(".", "downloads")
+	// Use the user's Downloads folder — familiar on both macOS and Windows
+	home, err := os.UserHomeDir()
+	if err != nil {
+		log.Fatalf("Could not determine home directory: %v", err)
+	}
+	downloadDir := filepath.Join(home, "Downloads")
 	if err := os.MkdirAll(downloadDir, 0755); err != nil {
 		log.Fatalf("Failed to create downloads directory: %v", err)
 	}
