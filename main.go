@@ -127,9 +127,14 @@ func main() {
 	maxEmptyFYsToCheck := 3
 
 	for {
-		// Skip already downloaded FYs (except current FY which may be incomplete)
+		// Skip already downloaded FYs (except current FY which may be incomplete).
+		// Setting foundActiveFY=true is critical: it tells the loop that records
+		// exist in this region so hitting 0 records further back means boundary.
 		if _, exists := downloadedFYs[fy.Label]; exists && fy.Label != currentFY.Label {
-			log.Printf("Skipping %s (already downloaded)", fy.Label)
+			if *verbose {
+				log.Printf("Skipping %s (already downloaded)", fy.Label)
+			}
+			foundActiveFY = true
 			fy = brokers.PreviousFY(fy)
 			continue
 		}

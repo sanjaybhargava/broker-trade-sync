@@ -24,7 +24,6 @@ broker-trade-sync/
 │   ├── broker.go        # Broker interface definition
 │   └── zerodha.go       # Zerodha broker implementation
 ├── main.go              # CLI entry point
-├── downloads/           # CSV storage (gitignored)
 ├── .env                 # Credentials (gitignored)
 ├── .env.example         # Template for .env
 ├── README.md
@@ -32,6 +31,8 @@ broker-trade-sync/
 ├── go.mod
 └── go.sum
 ```
+
+CSVs are saved to `~/Downloads` (macOS/Windows user Downloads folder), not a project subdirectory.
 
 ## Broker Interface
 
@@ -336,24 +337,29 @@ For each pane:
 4. Month panel (appears after year click): `div.mx-calendar-panel-month .mx-panel-month > span:nth-of-type(N)` where N = month number (1=Jan, 4=Apr, 3=Mar)
 5. Day cells: `{pane} table tbody td.cur-month` — iterate and click matching day number
 
-### Known Behaviors
+### Known Behaviors (verified in production)
 
-- Console landing page may or may not show "Login with Kite" button — code handles both cases with a 5s timeout
+- Console landing page may or may not show "Login with Kite" button — code handles both with a 5s timeout
 - TOTP auto-submits on 6th digit entry causing navigation mid-`MustInput` — wrap with `rod.Try()`
 - `WaitNavigation()` must be set up BEFORE any click that triggers navigation
-- CSV link (`div.table-section a:nth-of-type(2)`) is absent when no trades exist for the selected period — treat as RecordCount=0
-- Downloads are intercepted via `browser.WaitDownload(dir)` before clicking CSV; poll for `.crdownload` removal to confirm completion
-- Session may timeout on long runs; handle re-login if needed
+- CSV link (`div.table-section a:nth-of-type(2)`) is absent when no trades exist — treat as RecordCount=0
+- **Rod saves downloaded files using the download GUID as filename**, NOT `SuggestedFilename`. Use `info.GUID` for the rename source path. `WaitDownload()` blocks until the file is fully written — no `.crdownload` polling needed.
+- Date picker opened via JS: `() => document.querySelector('.mx-input-wrapper').click()` — SVG elements and their children do not work with `rod.MustClick()`
+- Year label selector: `{pane} a.mx-current-year` (not `a:nth-of-type(6)` as originally documented)
+- Day selector: `td[title="YYYY-MM-DD"]` — most reliable, use `date.Format("2006-01-02")`
+- 5s delay between FY downloads required to avoid Zerodha rate limiting
+- Zerodha supports data from 2013-04-01 onwards (`not-before` attribute on datepicker)
 
 ## Adding a New Broker
 
 1. Create `brokers/<brokername>.go` (e.g., `brokers/groww.go`)
 2. Use `package brokers` at the top of the file
 3. Implement the `Broker` interface with a struct like `GrowwBroker`
-4. Add a constructor function like `NewGrowwBroker(headless bool) (*GrowwBroker, error)`
-5. Add broker-specific env vars to `.env.example`
-6. Register broker in main.go's broker selection logic
-7. Document broker-specific details in this file
+4. Add a constructor: `NewGrowwBroker(headless bool, verbose bool) (*GrowwBroker, error)`
+5. Register in `init()`: `RegisterBroker("groww", func(headless bool, verbose bool) (Broker, error) { return NewGrowwBroker(headless, verbose) })`
+6. Use `z.verbose` / a `debugLog` helper to gate debug-level logs
+7. Add broker-specific env vars to `.env.example`
+8. Document broker-specific details in this file
 
 ## Commands Reference
 
@@ -367,17 +373,33 @@ go build -o broker-trade-sync
 # Run with visible browser (for debugging)
 go run . --headless=false
 
-# Specify broker (future)
+# Show detailed step-by-step logging
+go run . --verbose
+
+# Override broker without editing .env
 go run . --broker=zerodha
 
 # Clear saved credentials and re-run setup
 go run . --reset
 ```
 
+## Build Status
+
+All phases complete and verified in production (account BT2632):
+- Phase 1 ✅ Project setup
+- Phase 2 ✅ Core interface (brokers/broker.go)
+- Phase 3 ✅ Zerodha implementation — full end-to-end verified
+- Phase 4 ✅ Main CLI — flags, first-run setup, download loop, summary
+- Phase 5 ✅ Download manager — idempotency, FY scanning, boundary detection
+- Phase 6 ✅ Polish — --verbose, --broker, password masking, Ctrl+C
+
+**Not yet tested (requires waiting between runs):**
+- Subsequent run after N days: should re-download current FY only, skip all prior FYs. Logic is implemented and correct — `foundActiveFY=true` is set when skipping already-downloaded FYs, ensuring the historical boundary is correctly detected.
+
 ## Troubleshooting
 
-- **Login fails**: Check credentials in `.env`; verify the auth code entered at runtime is correct and not expired; use `--reset` to re-enter credentials
+- **Login fails**: Check credentials in `.env`; use `--reset` to re-enter
+- **TOTP not accepted**: Enter the code in the terminal (not the browser); make sure your authenticator app is time-synced
 - **Download hangs**: Run with `--headless=false` to see browser state
-- **No records found**: Verify date range and account has trading history
-- **File already exists**: This is expected; bot is idempotent
+- **Rate limited by Zerodha**: Wait a few minutes and re-run — already-downloaded FYs are skipped
 - **Want to change broker/credentials**: Run with `--reset` to clear `.env` and re-trigger setup
