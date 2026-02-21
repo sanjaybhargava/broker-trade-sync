@@ -1,4 +1,4 @@
-package main
+package brokers
 
 import (
 	"fmt"
@@ -27,9 +27,10 @@ type Broker interface {
 	// Name returns the broker identifier (e.g., "zerodha")
 	Name() string
 
-	// Login opens browser, navigates to login page, authenticates with 2FA
+	// Login opens browser, navigates to login page, prompts user for auth code at runtime
+	// authCode supports any method: TOTP, SMS OTP, email OTP
 	// Returns error if login fails
-	Login(username, password, totpSecret string) error
+	Login(username, password, authCode string) error
 
 	// NavigateToTradeBook navigates to the trade history/book section
 	NavigateToTradeBook() error
@@ -46,20 +47,41 @@ type Broker interface {
 	Close() error
 }
 
+// registry holds all registered broker constructors
+var registry = map[string]func(headless bool) (Broker, error){}
+
+// RegisterBroker adds a broker constructor to the registry
+func RegisterBroker(name string, constructor func(headless bool) (Broker, error)) {
+	registry[name] = constructor
+}
+
+// NewBroker creates a broker instance by name
+func NewBroker(name string, headless bool) (Broker, error) {
+	constructor, ok := registry[name]
+	if !ok {
+		return nil, fmt.Errorf("unknown broker: %s", name)
+	}
+	return constructor(headless)
+}
+
+// ListBrokers returns all registered broker names in sorted order
+func ListBrokers() []string {
+	names := make([]string, 0, len(registry))
+	for name := range registry {
+		names = append(names, name)
+	}
+	return names
+}
+
 // CurrentFY returns the current Indian financial year
 func CurrentFY() FinancialYear {
 	now := time.Now()
 	year := now.Year()
-
-	// If we're in Jan-Mar, FY started last year
-	// If we're in Apr-Dec, FY started this year
 	if now.Month() < time.April {
 		year--
 	}
-
 	startDate := time.Date(year, time.April, 1, 0, 0, 0, 0, time.Local)
 	endDate := time.Date(year+1, time.March, 31, 23, 59, 59, 0, time.Local)
-
 	return FinancialYear{
 		Label:     fmt.Sprintf("FY%d-%02d", year, (year+1)%100),
 		StartDate: startDate,
@@ -72,7 +94,6 @@ func PreviousFY(fy FinancialYear) FinancialYear {
 	year := fy.StartDate.Year() - 1
 	startDate := time.Date(year, time.April, 1, 0, 0, 0, 0, time.Local)
 	endDate := time.Date(year+1, time.March, 31, 23, 59, 59, 0, time.Local)
-
 	return FinancialYear{
 		Label:     fmt.Sprintf("FY%d-%02d", year, (year+1)%100),
 		StartDate: startDate,
@@ -95,10 +116,8 @@ func GenerateCSVFilename(accountNumber string, fy FinancialYear) string {
 }
 
 // ParseFYFromFilename extracts the financial year and account number from a CSV filename
-// Returns the FY, account number, and any error
 func ParseFYFromFilename(filename string) (*FinancialYear, string, error) {
 	base := filepath.Base(filename)
-	// Pattern: accountnumber_YYYYMMDD_YYYYMMDD.csv
 	re := regexp.MustCompile(`^([A-Z0-9]+)_(\d{8})_(\d{8})\.csv$`)
 	matches := re.FindStringSubmatch(base)
 	if matches == nil {
@@ -120,34 +139,28 @@ func ParseFYFromFilename(filename string) (*FinancialYear, string, error) {
 	startDate := time.Date(startYear, time.Month(startMonth), startDay, 0, 0, 0, 0, time.Local)
 	endDate := time.Date(endYear, time.Month(endMonth), endDay, 23, 59, 59, 0, time.Local)
 
-	fy := &FinancialYear{
+	return &FinancialYear{
 		Label:     fmt.Sprintf("FY%d-%02d", startYear, (startYear+1)%100),
 		StartDate: startDate,
 		EndDate:   endDate,
-	}
-
-	return fy, accountNumber, nil
+	}, accountNumber, nil
 }
 
 // GetDownloadedFYs scans the downloads directory and returns a map of already downloaded FYs
 // Key is the FY label (e.g., "FY2023-24"), value is the filename
 func GetDownloadedFYs(downloadDir string) (map[string]string, error) {
 	downloaded := make(map[string]string)
-
 	pattern := filepath.Join(downloadDir, "*.csv")
 	files, err := filepath.Glob(pattern)
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan downloads directory: %w", err)
 	}
-
 	for _, file := range files {
 		fy, _, err := ParseFYFromFilename(file)
 		if err != nil {
-			// Skip files that don't match the pattern
 			continue
 		}
 		downloaded[fy.Label] = filepath.Base(file)
 	}
-
 	return downloaded, nil
 }

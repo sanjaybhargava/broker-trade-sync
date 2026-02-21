@@ -1,4 +1,4 @@
-package main
+package brokers
 
 import (
 	"bufio"
@@ -13,6 +13,12 @@ import (
 	"github.com/go-rod/rod/lib/launcher"
 )
 
+func init() {
+	RegisterBroker("zerodha", func(headless bool) (Broker, error) {
+		return NewZerodhaBroker(headless)
+	})
+}
+
 // ZerodhaBroker implements the Broker interface for Zerodha Console
 type ZerodhaBroker struct {
 	browser       *rod.Browser
@@ -23,13 +29,10 @@ type ZerodhaBroker struct {
 
 // NewZerodhaBroker creates a new Zerodha broker instance
 func NewZerodhaBroker(headless bool) (*ZerodhaBroker, error) {
-	// Launch browser
 	url := launcher.New().
 		Headless(headless).
 		MustLaunch()
-
 	browser := rod.New().ControlURL(url).MustConnect()
-
 	return &ZerodhaBroker{
 		browser:  browser,
 		headless: headless,
@@ -44,25 +47,15 @@ func (z *ZerodhaBroker) Name() string {
 // Login opens browser, navigates to Zerodha Console, and authenticates.
 // It prompts the user at runtime for the auth code (TOTP/SMS/email OTP).
 func (z *ZerodhaBroker) Login(username, password, authCode string) error {
-	// Navigate to Zerodha Console login
 	z.page = z.browser.MustPage("https://console.zerodha.com/")
-
-	// Wait for login form to load
 	z.page.MustWaitLoad()
 
-	// Enter username
 	z.page.MustElement("input[type='text']").MustInput(username)
-
-	// Enter password
 	z.page.MustElement("input[type='password']").MustInput(password)
-
-	// Submit login form
 	z.page.MustElement("button[type='submit']").MustClick()
 
-	// Wait for auth code page
 	time.Sleep(2 * time.Second)
 
-	// Prompt user for auth code if not provided
 	if authCode == "" {
 		fmt.Print("Enter auth code (TOTP/SMS/email OTP): ")
 		scanner := bufio.NewScanner(os.Stdin)
@@ -71,13 +64,9 @@ func (z *ZerodhaBroker) Login(username, password, authCode string) error {
 		}
 	}
 
-	// Enter auth code
 	z.page.MustElement("input[type='text']").MustInput(authCode)
-
-	// Submit auth code
 	z.page.MustElement("button[type='submit']").MustClick()
 
-	// Wait for dashboard to load
 	time.Sleep(3 * time.Second)
 	z.page.MustWaitLoad()
 
@@ -86,37 +75,20 @@ func (z *ZerodhaBroker) Login(username, password, authCode string) error {
 
 // NavigateToTradeBook navigates to the trade history section
 func (z *ZerodhaBroker) NavigateToTradeBook() error {
-	// TODO: Navigate to the specific trade book URL or click through menus
-	// This will need to be adjusted based on Zerodha Console's actual structure
 	z.page.MustNavigate("https://console.zerodha.com/reports/tradebook")
 	z.page.MustWaitLoad()
 	time.Sleep(2 * time.Second)
-
 	return nil
 }
 
 // DownloadTradesForFY downloads the CSV for a specific financial year
 func (z *ZerodhaBroker) DownloadTradesForFY(fy FinancialYear, downloadDir string, accountNumber string) (*DownloadResult, error) {
 	// TODO: Implement date range selection and CSV download
-	// This is a placeholder that needs to be filled based on Zerodha Console's actual UI
-
-	// Set date range in the UI
-	// ...
-
-	// Click download CSV button
-	// ...
-
-	// Wait for download
-	// ...
-
-	// Move/rename downloaded file to match our naming convention
 	targetFilename := GenerateCSVFilename(accountNumber, fy)
 	targetPath := filepath.Join(downloadDir, targetFilename)
 
-	// Count records in CSV (placeholder - read actual downloaded file)
 	recordCount, err := countCSVRecords(targetPath)
 	if err != nil {
-		// If file doesn't exist, assume no records
 		recordCount = 0
 	}
 
@@ -132,11 +104,7 @@ func (z *ZerodhaBroker) GetAccountNumber() (string, error) {
 	if z.accountNumber != "" {
 		return z.accountNumber, nil
 	}
-
 	// TODO: Extract account number from page
-	// This could be from a user profile element, URL, or page content
-	// Placeholder - needs actual implementation
-
 	z.accountNumber = "PLACEHOLDER"
 	return z.accountNumber, nil
 }
@@ -163,11 +131,9 @@ func countCSVRecords(filePath string) (int, error) {
 		return 0, err
 	}
 
-	// Subtract 1 for header row
 	count := len(records) - 1
 	if count < 0 {
 		count = 0
 	}
-
 	return count, nil
 }
