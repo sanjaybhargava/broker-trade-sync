@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/csv"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -93,22 +94,40 @@ func (z *ZerodhaBroker) Login(username, password, authCode string) error {
 		}
 	}
 
-	// Set up the navigation wait BEFORE triggering it.
-	// Zerodha auto-submits the TOTP form when 6 digits are entered,
-	// which navigates away while MustInput is still finishing — that's expected.
-	// rod.Try catches the resulting context-cancelled panic so we can proceed.
-	waitNav := z.page.MustWaitNavigation()
-	rod.Try(func() { totpEl.MustInput(authCode) })
-	waitNav()
+	// Re-fetch the TOTP element just before typing — the element reference can
+	// go stale between when we found it and when the user finishes typing their
+	// auth code. Then click it to ensure focus before inputting.
+	totpEl = z.page.MustElement("[label='External TOTP']")
+	totpEl.MustClick()
 
-	return nil
+	// Type the TOTP. Zerodha auto-submits when 6 digits are entered, which
+	// navigates the page away while MustInput is still finishing. rod.Try
+	// catches the resulting context-cancelled panic.
+	rod.Try(func() { totpEl.MustInput(authCode) })
+
+	// Poll the URL until we land on the dashboard (up to 20 seconds).
+	// This is more reliable than MustWaitNavigation() which can hang if the
+	// navigation event is missed or the TOTP was wrong/expired.
+	for i := 0; i < 40; i++ {
+		info, err := z.page.Info()
+		if err == nil && strings.Contains(info.URL, "console.zerodha.com") &&
+			!strings.Contains(info.URL, "kite.zerodha.com") {
+			return nil
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return fmt.Errorf("dashboard did not load after TOTP — code may be wrong or expired (run with --reset to re-enter credentials)")
 }
 
 // NavigateToTradeBook navigates to the trade history section
 func (z *ZerodhaBroker) NavigateToTradeBook() error {
 	z.page.MustNavigate("https://console.zerodha.com/reports/tradebook")
 	z.page.MustWaitLoad()
-	time.Sleep(2 * time.Second)
+	// Wait for the calendar icon to be visible — confirms Vue datepicker has mounted.
+	// The icon is always visible on the page (not inside the popup), so this is reliable.
+	if _, err := z.page.Timeout(15 * time.Second).Element("svg.mx-calendar-icon"); err != nil {
+		return fmt.Errorf("tradebook date picker did not appear: %w", err)
+	}
 	return nil
 }
 
@@ -127,34 +146,36 @@ func (z *ZerodhaBroker) DownloadTradesForFY(fy FinancialYear, downloadDir string
 		}
 	}
 
-	// Clear any existing date selection before setting a new one
-	if clearBtn, err := z.page.Timeout(1 * time.Second).Element("span.mx-clear-wrapper"); err == nil {
-		clearBtn.MustClick()
-		time.Sleep(300 * time.Millisecond)
+	// Open the date picker via JS — Rod's MustClick() hangs on SVG elements
+	// because it can't resolve their click geometry reliably.
+	log.Println("[debug] clicking calendar icon")
+	z.page.MustEval(`document.querySelector('svg.mx-calendar-icon').dispatchEvent(new MouseEvent('click', {bubbles:true}))`)
+
+	log.Println("[debug] waiting for popup to be visible")
+	if err := z.page.MustElement(".mx-datepicker-popup").WaitVisible(); err != nil {
+		return nil, fmt.Errorf("date picker did not open: %w", err)
+	}
+	log.Println("[debug] popup open")
+
+	// Use today as end date for current FY — the FY end (Mar 31) may be in the
+	// future and the calendar won't allow clicking future dates.
+	startDate := fy.StartDate
+	endDate := fy.EndDate
+	if endDate.After(time.Now()) {
+		endDate = time.Now()
 	}
 
-	// Open the date range picker
-	z.page.MustElement("div.three input").MustClick()
+	log.Printf("[debug] selecting start date %s", startDate.Format("2006-01-02"))
+	if err := z.selectCalendarDate(1, startDate); err != nil {
+		return nil, fmt.Errorf("selecting start date: %w", err)
+	}
+	log.Printf("[debug] selecting end date %s", endDate.Format("2006-01-02"))
+	if err := z.selectCalendarDate(2, endDate); err != nil {
+		return nil, fmt.Errorf("selecting end date: %w", err)
+	}
 	time.Sleep(500 * time.Millisecond)
 
-	// Use preset buttons for current/prev FY; manually navigate calendar for older FYs
-	prevFY := PreviousFY(currentFY)
-	switch fy.Label {
-	case currentFY.Label:
-		z.page.MustElement("button:nth-of-type(4)").MustClick() // "current FY"
-	case prevFY.Label:
-		z.page.MustElement("button:nth-of-type(3)").MustClick() // "prev. FY"
-	default:
-		if err := z.selectCalendarDate(1, fy.StartDate); err != nil {
-			return nil, fmt.Errorf("selecting start date: %w", err)
-		}
-		if err := z.selectCalendarDate(2, fy.EndDate); err != nil {
-			return nil, fmt.Errorf("selecting end date: %w", err)
-		}
-	}
-	time.Sleep(300 * time.Millisecond)
-
-	// Click the search/filter button
+	log.Println("[debug] clicking search button")
 	z.page.MustElement("div.one span").MustClick()
 	time.Sleep(2 * time.Second)
 
@@ -194,18 +215,18 @@ func (z *ZerodhaBroker) DownloadTradesForFY(fy FinancialYear, downloadDir string
 }
 
 // selectCalendarDate navigates the vue2-datepicker calendar pane (1=left/From, 2=right/To)
-// to the given date and clicks it. Uses the year picker then month picker for efficiency.
+// to the given date and clicks it. Flow: click year label → pick year → pick month → pick day.
 func (z *ZerodhaBroker) selectCalendarDate(pane int, date time.Time) error {
 	paneSelector := fmt.Sprintf("div.mx-range-wrapper > div:nth-of-type(%d)", pane)
 
-	// Click the year label in the calendar header to open the year picker
-	z.page.MustElement(paneSelector + " a:nth-of-type(6)").MustClick()
+	log.Printf("[debug] pane %d: clicking year label", pane)
+	z.page.MustElement(paneSelector + " a.mx-current-year").MustClick()
 	time.Sleep(300 * time.Millisecond)
 
-	// Find and click the target year; navigate to previous decade if not visible
+	// Find and click the target year span; navigate decade if not visible
 	targetYear := date.Year()
 	for attempt := 0; attempt < 5; attempt++ {
-		spans := z.page.MustElements("div.mx-calendar-panel-year .mx-panel-year span")
+		spans := z.page.MustElements(paneSelector + " .mx-panel-year span")
 		found := false
 		for _, span := range spans {
 			y, _ := strconv.Atoi(strings.TrimSpace(span.MustText()))
@@ -219,32 +240,21 @@ func (z *ZerodhaBroker) selectCalendarDate(pane int, date time.Time) error {
 			break
 		}
 		if attempt == 4 {
-			return fmt.Errorf("year %d not found in date picker after navigating back 5 decades", targetYear)
+			return fmt.Errorf("year %d not found in date picker", targetYear)
 		}
-		// Go to previous decade and try again
-		z.page.MustElement("div.mx-calendar-panel-year a.mx-icon-last-year").MustClick()
+		z.page.MustElement(paneSelector + " .mx-calendar-header a.mx-icon-last-year").MustClick()
 		time.Sleep(300 * time.Millisecond)
 	}
 	time.Sleep(300 * time.Millisecond)
 
-	// Click the target month (span index = month number: 1=Jan, 4=Apr, 3=Mar, etc.)
+	// Click the target month span (1=Jan, 4=Apr, 3=Mar, etc.)
 	month := int(date.Month())
-	z.page.MustElement(fmt.Sprintf(
-		"div.mx-calendar-panel-month .mx-panel-month > span:nth-of-type(%d)", month,
-	)).MustClick()
+	z.page.MustElement(fmt.Sprintf(paneSelector+" .mx-panel-month span:nth-of-type(%d)", month)).MustClick()
 	time.Sleep(300 * time.Millisecond)
 
-	// Click the target day within the current-month cells of this pane
-	day := date.Day()
-	cells := z.page.MustElements(paneSelector + " table tbody td.cur-month")
-	for _, cell := range cells {
-		d, _ := strconv.Atoi(strings.TrimSpace(cell.MustText()))
-		if d == day {
-			cell.MustClick()
-			return nil
-		}
-	}
-	return fmt.Errorf("day %d not found in calendar for %s", day, date.Format("2006-01"))
+	// Click the day cell by its title attribute (format: YYYY-MM-DD) — unambiguous
+	z.page.MustElement(fmt.Sprintf(`td[title="%s"]`, date.Format("2006-01-02"))).MustClick()
+	return nil
 }
 
 // GetAccountNumber returns the client ID, which for Zerodha is the username
