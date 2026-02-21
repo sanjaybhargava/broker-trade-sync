@@ -146,6 +146,9 @@ func (z *ZerodhaBroker) DownloadTradesForFY(fy FinancialYear, downloadDir string
 		}
 	}
 
+	// Brief pause between FY downloads to avoid Zerodha rate limiting.
+	time.Sleep(5 * time.Second)
+
 	// Open the date picker via JS — Rod's MustClick() hangs on SVG elements
 	// because it can't resolve their click geometry reliably.
 	log.Println("[debug] clicking calendar icon")
@@ -185,24 +188,14 @@ func (z *ZerodhaBroker) DownloadTradesForFY(fy FinancialYear, downloadDir string
 		return &DownloadResult{Filename: targetFilename, RecordCount: 0, FY: fy}, nil
 	}
 
-	// Intercept the download before clicking so we know the filename
+	// Intercept the download before clicking. Rod saves the file using the
+	// download GUID as filename (not the suggested filename).
 	wait := z.browser.WaitDownload(downloadDir)
 	csvEl.MustClick()
-	info := wait()
+	info := wait() // blocks until download is complete and file is written
 
-	// Poll until the file is fully written (no .crdownload temp file)
-	downloadedPath := filepath.Join(downloadDir, info.SuggestedFilename)
-	deadline := time.Now().Add(60 * time.Second)
-	for time.Now().Before(deadline) {
-		_, crErr := os.Stat(downloadedPath + ".crdownload")
-		_, fileErr := os.Stat(downloadedPath)
-		if os.IsNotExist(crErr) && fileErr == nil {
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-
-	// Rename to our naming convention
+	// Rod writes the file as <GUID> in downloadDir — rename to our convention
+	downloadedPath := filepath.Join(downloadDir, info.GUID)
 	if err := os.Rename(downloadedPath, targetPath); err != nil {
 		return nil, fmt.Errorf("renaming downloaded file: %w", err)
 	}
