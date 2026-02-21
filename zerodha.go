@@ -1,15 +1,16 @@
 package main
 
 import (
+	"bufio"
 	"encoding/csv"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
-	"github.com/pquerna/otp/totp"
 )
 
 // ZerodhaBroker implements the Broker interface for Zerodha Console
@@ -40,8 +41,9 @@ func (z *ZerodhaBroker) Name() string {
 	return "zerodha"
 }
 
-// Login opens browser, navigates to Zerodha Console, and authenticates
-func (z *ZerodhaBroker) Login(username, password, totpSecret string) error {
+// Login opens browser, navigates to Zerodha Console, and authenticates.
+// It prompts the user at runtime for the auth code (TOTP/SMS/email OTP).
+func (z *ZerodhaBroker) Login(username, password, authCode string) error {
 	// Navigate to Zerodha Console login
 	z.page = z.browser.MustPage("https://console.zerodha.com/")
 
@@ -57,19 +59,22 @@ func (z *ZerodhaBroker) Login(username, password, totpSecret string) error {
 	// Submit login form
 	z.page.MustElement("button[type='submit']").MustClick()
 
-	// Wait for TOTP page
+	// Wait for auth code page
 	time.Sleep(2 * time.Second)
 
-	// Generate TOTP
-	otp, err := totp.GenerateCode(totpSecret, time.Now())
-	if err != nil {
-		return fmt.Errorf("failed to generate TOTP: %w", err)
+	// Prompt user for auth code if not provided
+	if authCode == "" {
+		fmt.Print("Enter auth code (TOTP/SMS/email OTP): ")
+		scanner := bufio.NewScanner(os.Stdin)
+		if scanner.Scan() {
+			authCode = strings.TrimSpace(scanner.Text())
+		}
 	}
 
-	// Enter TOTP
-	z.page.MustElement("input[type='text']").MustInput(otp)
+	// Enter auth code
+	z.page.MustElement("input[type='text']").MustInput(authCode)
 
-	// Submit TOTP
+	// Submit auth code
 	z.page.MustElement("button[type='submit']").MustClick()
 
 	// Wait for dashboard to load
