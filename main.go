@@ -14,7 +14,6 @@ import (
 	"syscall"
 
 	"github.com/joho/godotenv"
-	"golang.org/x/term"
 
 	"broker-trade-sync/brokers"
 )
@@ -203,14 +202,10 @@ func runFirstRunSetup() error {
 	username, _ := reader.ReadString('\n')
 	username = strings.TrimSpace(username)
 
-	// Prompt password with hidden input so it doesn't appear on screen
+	// Prompt password (visible input)
 	fmt.Print("Password: ")
-	passwordBytes, err := term.ReadPassword(int(syscall.Stdin))
-	fmt.Println()
-	if err != nil {
-		return fmt.Errorf("failed to read password: %w", err)
-	}
-	password := strings.TrimSpace(string(passwordBytes))
+	passwordRaw, _ := reader.ReadString('\n')
+	password := strings.TrimSpace(passwordRaw)
 
 	// Write .env
 	envContent := fmt.Sprintf("BROKER=%s\n%s_USERNAME=%s\n%s_PASSWORD=%s\n",

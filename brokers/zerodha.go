@@ -117,18 +117,14 @@ func (z *ZerodhaBroker) Login(username, password, authCode string) error {
 	// catches the resulting context-cancelled panic.
 	rod.Try(func() { totpEl.MustInput(authCode) })
 
-	// Poll the URL until we land on the dashboard (up to 20 seconds).
-	// This is more reliable than MustWaitNavigation() which can hang if the
-	// navigation event is missed or the TOTP was wrong/expired.
-	for i := 0; i < 40; i++ {
-		info, err := z.page.Info()
-		if err == nil && strings.Contains(info.URL, "console.zerodha.com") &&
-			!strings.Contains(info.URL, "kite.zerodha.com") {
-			return nil
-		}
-		time.Sleep(500 * time.Millisecond)
+	// Wait for a nav element that only appears on the authenticated console
+	// dashboard. Element-based detection is more reliable than URL polling:
+	// Zerodha's redirect chain may briefly pass through non-console URLs, causing
+	// a URL check to time out even when login actually succeeded.
+	if _, err := z.page.Timeout(20 * time.Second).Element(`a[href*="tradebook"]`); err != nil {
+		return fmt.Errorf("dashboard did not load after TOTP — code may be wrong or expired (run with --reset to re-enter credentials)")
 	}
-	return fmt.Errorf("dashboard did not load after TOTP — code may be wrong or expired (run with --reset to re-enter credentials)")
+	return nil
 }
 
 // NavigateToTradeBook navigates to the trade history section
