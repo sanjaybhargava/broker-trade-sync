@@ -24,6 +24,7 @@ broker-trade-sync/
 │   ├── broker.go        # Broker interface definition
 │   └── zerodha.go       # Zerodha broker implementation
 ├── main.go              # CLI entry point
+├── build.sh             # Cross-platform build script
 ├── .env                 # Credentials (gitignored)
 ├── .env.example         # Template for .env
 ├── README.md
@@ -126,7 +127,6 @@ Example: `ZX1234_20230401_20240331.csv`
 require (
     github.com/go-rod/rod v0.116.x      // Browser automation
     github.com/joho/godotenv v1.5.x     // .env file loading
-    golang.org/x/term v0.x.x            // Hidden password input
 )
 ```
 
@@ -157,7 +157,7 @@ If `.env` does not exist when the bot starts, enter interactive setup mode:
    ```
 3. Read the user's selection and resolve it to the broker identifier
 4. Prompt: `Username:` — read username from stdin
-5. Prompt: `Password:` — read password with echo disabled (use `golang.org/x/term` or equivalent)
+5. Prompt: `Password:` — read password with standard visible input (plain `bufio.ReadString`)
 6. Write all values to `.env` automatically
 7. Proceed with the normal run
 
@@ -212,7 +212,7 @@ if err != nil {
 2. Create folder structure as specified
 3. Create `.env.example` with placeholder values
 4. Add `.gitignore` for `.env`, `downloads/`, and Go build artifacts
-5. Install dependencies: `go get github.com/go-rod/rod github.com/joho/godotenv golang.org/x/term`
+5. Install dependencies: `go get github.com/go-rod/rod github.com/joho/godotenv`
 
 ### Phase 2: Core Interface
 
@@ -349,6 +349,7 @@ For each pane:
 - Day selector: `td[title="YYYY-MM-DD"]` — most reliable, use `date.Format("2006-01-02")`
 - 5s delay between FY downloads required to avoid Zerodha rate limiting
 - Zerodha supports data from 2013-04-01 onwards (`not-before` attribute on datepicker)
+- **Post-login success detection**: URL polling is unreliable — Zerodha's redirect chain briefly passes through non-console URLs. Wait for `a[href*="tradebook"]` element instead; it only appears in the authenticated sidebar.
 
 ## Adding a New Broker
 
@@ -367,8 +368,11 @@ For each pane:
 # Run the bot (first run: prompts for credentials if no .env)
 go run .
 
-# Build binary
+# Build binary for current platform
 go build -o broker-trade-sync
+
+# Build all platform binaries into ~/Downloads
+bash build.sh
 
 # Run with visible browser (for debugging)
 go run . --headless=false
@@ -391,7 +395,8 @@ All phases complete and verified in production (account BT2632):
 - Phase 3 ✅ Zerodha implementation — full end-to-end verified
 - Phase 4 ✅ Main CLI — flags, first-run setup, download loop, summary
 - Phase 5 ✅ Download manager — idempotency, FY scanning, boundary detection
-- Phase 6 ✅ Polish — --verbose, --broker, password masking, Ctrl+C
+- Phase 6 ✅ Polish — --verbose, --broker, Ctrl+C
+- build.sh ✅ Cross-platform build script (mac-m1, mac-intel, windows.exe → ~/Downloads)
 
 **Not yet tested (requires waiting between runs):**
 - Subsequent run after N days: should re-download current FY only, skip all prior FYs. Logic is implemented and correct — `foundActiveFY=true` is set when skipping already-downloaded FYs, ensuring the historical boundary is correctly detected.
