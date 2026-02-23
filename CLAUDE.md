@@ -159,7 +159,7 @@ If `.env` does not exist when the bot starts, the flow is:
 4. Prompt: `Password:` — read with plain `bufio.ReadString` (visible input)
 5. Write all values to `.env` automatically
 6. `Login()` runs: Rod navigates to login page and types username + password
-7. Prompt: `Enter auth code (TOTP / mobile app code):` — read from stdin
+7. Prompt: `Enter auth code (TOTP / SMS OTP / mobile app code):` — read from stdin
 8. Rod types the code and submits — proceeds with downloads
 
 This ensures the browser is always open before any credentials are typed, giving a consistent experience across all machines.
@@ -311,9 +311,9 @@ The Zerodha client ID (e.g. `BT2632`) is the same as the username. No separate e
 - Submit button: `button[type='submit']`
 - 2FA field (second step): `input[type='number'][maxlength='6']` — matches all Zerodha 2FA methods
   - `id="userid"` (reused from username field), `maxlength="6"`
-  - The `label` attribute varies by method: `External TOTP` for authenticator apps, different value for mobile app code — do NOT rely on `label`
+  - The `label` attribute varies by method: `External TOTP` for authenticator apps, different value for mobile app code/SMS OTP — do NOT rely on `label`
   - **TOTP**: auto-submits on 6th digit — use `rod.Try()` around `MustInput` to handle context cancel mid-navigation
-  - **Mobile app code**: does NOT auto-submit — click `button[type='submit']` after input; wrap in `rod.Try()` so it's harmless if TOTP already navigated away
+  - **Mobile app code / SMS OTP**: does NOT auto-submit — click `button[type='submit']` after input; wrap in `rod.Try()` so it's harmless if TOTP already navigated away
 
 **Login button on console landing page (if present)**
 - Selector: `button.btn-blue`
@@ -404,7 +404,7 @@ All phases complete and verified in production:
 - Phase 6 ✅ Polish — --verbose, --broker, Ctrl+C
 - build.sh ✅ Cross-platform build script (mac-m1, mac-intel, windows.exe → ~/Downloads)
 - ✅ Consistent first-run flow: browser always opens before credential prompts (all machines)
-- ✅ Both Zerodha 2FA methods supported: TOTP (auto-submit) and mobile app code (explicit submit)
+- ✅ All three Zerodha 2FA methods supported: TOTP (auto-submit), SMS OTP (explicit submit), mobile app code (explicit submit)
 
 **Not yet tested (requires waiting between runs):**
 - Subsequent run after N days: should re-download current FY only, skip all prior FYs. Logic is implemented and correct — `foundActiveFY=true` is set when skipping already-downloaded FYs, ensuring the historical boundary is correctly detected.
@@ -412,7 +412,7 @@ All phases complete and verified in production:
 ## Troubleshooting
 
 - **Login fails**: Check credentials in `.env`; use `--reset` to re-enter
-- **2FA code not accepted**: Enter the code in the terminal (not the browser); for TOTP make sure your authenticator app is time-synced; for mobile app code open the Zerodha app and use the code shown there
+- **2FA code not accepted**: Enter the code in the terminal (not the browser); for TOTP make sure your authenticator app is time-synced; for SMS OTP check your registered mobile number; for mobile app code open the Zerodha app and use the code shown there
 - **Download hangs**: Run with `--headless=false` to see browser state
 - **Rate limited by Zerodha**: Wait a few minutes and re-run — already-downloaded FYs are skipped
 - **Want to change broker/credentials**: Run with `--reset` to clear `.env` and re-trigger setup

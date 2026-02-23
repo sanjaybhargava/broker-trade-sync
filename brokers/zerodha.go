@@ -97,7 +97,7 @@ func (z *ZerodhaBroker) Login(username, password, authCode string) error {
 
 	// Prompt for auth code now that the 2FA screen is ready
 	if authCode == "" {
-		fmt.Print("Enter auth code (TOTP / mobile app code): ")
+		fmt.Print("Enter auth code (TOTP / SMS OTP / mobile app code): ")
 		scanner := bufio.NewScanner(os.Stdin)
 		if scanner.Scan() {
 			authCode = strings.TrimSpace(scanner.Text())

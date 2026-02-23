@@ -5,7 +5,7 @@ A Go CLI bot that automates downloading trade history CSVs from broker web conso
 ## Features
 
 - Interactive first-run setup — no manual config file editing
-- Login with runtime TOTP/OTP prompt (auth code never stored)
+- Login with runtime TOTP/SMS OTP/mobile app code prompt (auth code never stored)
 - Downloads trade CSVs for every financial year (Indian FY: Apr 1 - Mar 31)
 - Idempotent — re-running skips already-downloaded FYs, always refreshes current FY
 - Files saved to your `~/Downloads` folder
@@ -31,7 +31,7 @@ go mod download
 go run .
 ```
 
-On first run, the bot will interactively ask for your broker, username, and password, then save them to `.env`. On every run, it prompts for your TOTP/OTP at login time — auth codes are never stored.
+On first run, the bot will interactively ask for your broker, username, and password, then save them to `.env`. On every run, it prompts for your TOTP/SMS OTP/mobile app code at login time — auth codes are never stored.
 
 ### Commands
 
@@ -56,7 +56,7 @@ go run . --broker=zerodha
 
 ### First Run
 1. Prompts for broker, username, password — saves to `.env`
-2. Prompts for TOTP/OTP at login (never stored)
+2. Prompts for TOTP/SMS OTP/mobile app code at login (never stored)
 3. Starts from current financial year, goes backward FY by FY
 4. Downloads CSV for each FY that has trades
 5. Stops when it finds a FY with no trading activity
@@ -98,7 +98,7 @@ broker-trade-sync/
 
 - Credentials stored in `.env` (gitignored, never committed)
 - Password input is hidden during setup
-- TOTP/OTP prompted at runtime and never stored anywhere
+- TOTP/SMS OTP/mobile app code prompted at runtime and never stored anywhere
 - All data stays on your machine — no external services involved
 
 ## Adding a New Broker
@@ -113,7 +113,7 @@ See `brokers/zerodha.go` as a reference implementation.
 ## Troubleshooting
 
 - **Login fails** — check credentials in `.env`; run `go run . --reset` to re-enter
-- **Wrong TOTP** — type your code in the terminal (not the browser), make sure your authenticator app is time-synced
+- **Wrong 2FA code** — type your code in the terminal (not the browser); for TOTP make sure your authenticator app is time-synced; for SMS OTP check your registered mobile number; for mobile app code open the Zerodha app
 - **Download hangs** — run with `--headless=false` to watch the browser
 - **No records found** — your account may not have trades in recent FYs; the bot will ask before checking further back
 - **Rate limited** — Zerodha may block repeated requests; wait a few minutes and re-run (already-downloaded FYs are skipped automatically)
