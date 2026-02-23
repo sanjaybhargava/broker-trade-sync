@@ -83,46 +83,51 @@ func (z *ZerodhaBroker) Login(username, password, authCode string) error {
 	z.page.MustElement("#password").MustInput(password)
 	z.page.MustElement("button[type='submit']").MustClick()
 
-	// After the login button click the page transitions to the TOTP screen.
-	// The TOTP input reuses id="userid" but carries aria-label="External TOTP".
-	// Wait up to 15 seconds; if it doesn't appear, credentials were likely wrong.
-	totpEl, err := z.page.Timeout(15 * time.Second).Element("[label='External TOTP']")
+	// After submitting credentials the page transitions to a 2FA screen.
+	// Zerodha uses different label values depending on the user's 2FA method
+	// (e.g. "External TOTP", mobile app code, etc.) so we wait for the common
+	// structural signature: a 6-digit numeric input that reuses id="userid".
+	authEl, err := z.page.Timeout(15 * time.Second).Element(`input[type='number'][maxlength='6']`)
 	if err != nil {
 		return fmt.Errorf("login failed — check username and password (run with --reset to re-enter credentials)")
 	}
-	if err := totpEl.WaitVisible(); err != nil {
-		return fmt.Errorf("TOTP field did not become visible: %w", err)
+	if err := authEl.WaitVisible(); err != nil {
+		return fmt.Errorf("2FA field did not become visible: %w", err)
 	}
 
-	// Prompt for auth code now that the TOTP screen is ready
+	// Prompt for auth code now that the 2FA screen is ready
 	if authCode == "" {
-		fmt.Print("Enter auth code (TOTP/SMS/email OTP): ")
+		fmt.Print("Enter auth code (TOTP / mobile app code): ")
 		scanner := bufio.NewScanner(os.Stdin)
 		if scanner.Scan() {
 			authCode = strings.TrimSpace(scanner.Text())
 		}
 		if authCode == "" {
-			return fmt.Errorf("no auth code entered — re-run and type your TOTP when prompted")
+			return fmt.Errorf("no auth code entered — re-run and type your code when prompted")
 		}
 	}
 
-	// Re-fetch the TOTP element just before typing — the element reference can
-	// go stale between when we found it and when the user finishes typing their
-	// auth code. Then click it to ensure focus before inputting.
-	totpEl = z.page.MustElement("[label='External TOTP']")
-	totpEl.MustClick()
+	// Re-fetch the element just before typing — the reference can go stale
+	// while the user is typing their auth code. Click to ensure focus.
+	authEl = z.page.MustElement(`input[type='number'][maxlength='6']`)
+	authEl.MustClick()
 
-	// Type the TOTP. Zerodha auto-submits when 6 digits are entered, which
-	// navigates the page away while MustInput is still finishing. rod.Try
-	// catches the resulting context-cancelled panic.
-	rod.Try(func() { totpEl.MustInput(authCode) })
+	// Type the code. TOTP auto-submits on the 6th digit, navigating the page
+	// away mid-input — rod.Try catches the resulting context-cancelled panic.
+	// Mobile app code does NOT auto-submit, so we also click the submit button
+	// afterwards; rod.Try makes that a no-op if TOTP already navigated away.
+	rod.Try(func() { authEl.MustInput(authCode) })
+	rod.Try(func() { z.page.MustElement("button[type='submit']").MustClick() })
 
-	// Wait for a nav element that only appears on the authenticated console
-	// dashboard. Element-based detection is more reliable than URL polling:
-	// Zerodha's redirect chain may briefly pass through non-console URLs, causing
-	// a URL check to time out even when login actually succeeded.
-	if _, err := z.page.Timeout(20 * time.Second).Element(`a[href*="tradebook"]`); err != nil {
-		return fmt.Errorf("dashboard did not load after TOTP — code may be wrong or expired (run with --reset to re-enter credentials)")
+	// Wait for the authenticated console dashboard. Try the tradebook sidebar
+	// link first (reliable for most accounts). If it doesn't appear within 30s,
+	// fall back to checking the URL — if we're on console.zerodha.com the login
+	// succeeded even if the tradebook link isn't present in this account's sidebar.
+	if _, err := z.page.Timeout(30 * time.Second).Element(`a[href*="tradebook"]`); err != nil {
+		if info, infoErr := z.page.Info(); infoErr == nil && strings.Contains(info.URL, "console.zerodha.com") {
+			return nil
+		}
+		return fmt.Errorf("dashboard did not load after 2FA — code may be wrong or expired (run with --reset to re-enter credentials)")
 	}
 	return nil
 }

@@ -38,27 +38,28 @@ func main() {
 		log.Println("Credentials cleared. Starting fresh setup...")
 	}
 
-	// First-run setup if .env doesn't exist
+	// On first run, ask only for broker name — browser opens before credentials are collected
+	var brokerName string
+	isFirstRun := false
 	if _, err := os.Stat(envFile); os.IsNotExist(err) {
-		if err := runFirstRunSetup(); err != nil {
+		isFirstRun = true
+		selected, err := selectBroker()
+		if err != nil {
 			log.Fatalf("Setup failed: %v", err)
+		}
+		brokerName = selected
+	} else {
+		if err := godotenv.Load(envFile); err != nil {
+			log.Fatalf("Failed to load .env: %v", err)
+		}
+		brokerName = os.Getenv("BROKER")
+		if *brokerOverride != "" {
+			brokerName = *brokerOverride
 		}
 	}
 
-	// Load .env silently
-	if err := godotenv.Load(envFile); err != nil {
-		log.Fatalf("Failed to load .env: %v", err)
-	}
-
-	brokerName := os.Getenv("BROKER")
-	if *brokerOverride != "" {
-		brokerName = *brokerOverride
-	}
-	username := os.Getenv(strings.ToUpper(brokerName) + "_USERNAME")
-	password := os.Getenv(strings.ToUpper(brokerName) + "_PASSWORD")
-
-	if brokerName == "" || username == "" || password == "" {
-		log.Fatal("Missing credentials in .env. Run with --reset to reconfigure.")
+	if brokerName == "" {
+		log.Fatal("No broker configured. Run with --reset to reconfigure.")
 	}
 
 	// Use the user's Downloads folder — familiar on both macOS and Windows
@@ -71,7 +72,7 @@ func main() {
 		log.Fatalf("Failed to create downloads directory: %v", err)
 	}
 
-	// Initialize broker
+	// Initialize broker — browser opens HERE, before any credential prompts
 	broker, err := brokers.NewBroker(brokerName, *headless, *verbose)
 	if err != nil {
 		log.Fatalf("Failed to initialize broker: %v", err)
@@ -88,7 +89,28 @@ func main() {
 		os.Exit(1)
 	}()
 
-	// Login (broker prompts for auth code at runtime)
+	// On first run, prompt for credentials now that the browser is already open
+	var username, password string
+	if isFirstRun {
+		u, p, err := promptCredentials()
+		if err != nil {
+			log.Fatalf("Setup failed: %v", err)
+		}
+		username, password = u, p
+		if err := saveEnvFile(brokerName, username, password); err != nil {
+			log.Fatalf("Failed to save credentials: %v", err)
+		}
+		fmt.Printf("Credentials saved to %s\n\n", envFile)
+	} else {
+		username = os.Getenv(strings.ToUpper(brokerName) + "_USERNAME")
+		password = os.Getenv(strings.ToUpper(brokerName) + "_PASSWORD")
+	}
+
+	if username == "" || password == "" {
+		log.Fatal("Missing credentials in .env. Run with --reset to reconfigure.")
+	}
+
+	// Login: Rod navigates, types username+password, then prompts for auth code in terminal
 	log.Printf("Logging into %s...", broker.Name())
 	if err := broker.Login(username, password, ""); err != nil {
 		log.Fatalf("Login failed: %v", err)
@@ -173,10 +195,11 @@ func main() {
 	printSummary(results)
 }
 
-func runFirstRunSetup() error {
+// selectBroker shows the broker menu and returns the chosen broker name.
+// Called before the browser opens so the user can pick their broker.
+func selectBroker() (string, error) {
 	reader := bufio.NewReader(os.Stdin)
 
-	// Show broker menu
 	available := brokers.ListBrokers()
 	sort.Strings(available)
 
@@ -193,21 +216,31 @@ func runFirstRunSetup() error {
 	input = strings.TrimSpace(input)
 	choice, err := strconv.Atoi(input)
 	if err != nil || choice < 1 || choice > len(available) {
-		return fmt.Errorf("invalid selection: %s", input)
+		return "", fmt.Errorf("invalid selection: %s", input)
 	}
-	brokerName := available[choice-1]
+	return available[choice-1], nil
+}
 
-	// Prompt username
+// promptCredentials asks for username and password after the browser is already open.
+func promptCredentials() (username, password string, err error) {
+	reader := bufio.NewReader(os.Stdin)
+
 	fmt.Print("Username: ")
-	username, _ := reader.ReadString('\n')
-	username = strings.TrimSpace(username)
+	u, _ := reader.ReadString('\n')
+	username = strings.TrimSpace(u)
 
-	// Prompt password (visible input)
 	fmt.Print("Password: ")
-	passwordRaw, _ := reader.ReadString('\n')
-	password := strings.TrimSpace(passwordRaw)
+	p, _ := reader.ReadString('\n')
+	password = strings.TrimSpace(p)
 
-	// Write .env
+	if username == "" || password == "" {
+		return "", "", fmt.Errorf("username and password cannot be empty")
+	}
+	return username, password, nil
+}
+
+// saveEnvFile writes broker credentials to the .env file.
+func saveEnvFile(brokerName, username, password string) error {
 	envContent := fmt.Sprintf("BROKER=%s\n%s_USERNAME=%s\n%s_PASSWORD=%s\n",
 		brokerName,
 		strings.ToUpper(brokerName), username,
@@ -216,8 +249,6 @@ func runFirstRunSetup() error {
 	if err := os.WriteFile(envFile, []byte(envContent), 0600); err != nil {
 		return fmt.Errorf("failed to write .env: %w", err)
 	}
-
-	fmt.Printf("Setup complete. Credentials saved to %s\n\n", envFile)
 	return nil
 }
 

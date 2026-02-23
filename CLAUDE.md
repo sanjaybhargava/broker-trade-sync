@@ -142,10 +142,9 @@ ZERODHA_PASSWORD=your_password
 
 ### First Run Setup (no `.env` present)
 
-If `.env` does not exist when the bot starts, enter interactive setup mode:
+If `.env` does not exist when the bot starts, the flow is:
 
-1. Scan the `brokers/` folder to discover all available broker implementations
-2. Display a numbered menu, e.g.:
+1. Show broker menu and read selection (terminal only — browser not open yet):
    ```
    Select your broker:
      1. Zerodha
@@ -155,11 +154,15 @@ If `.env` does not exist when the bot starts, enter interactive setup mode:
 
    Enter number:
    ```
-3. Read the user's selection and resolve it to the broker identifier
-4. Prompt: `Username:` — read username from stdin
-5. Prompt: `Password:` — read password with standard visible input (plain `bufio.ReadString`)
-6. Write all values to `.env` automatically
-7. Proceed with the normal run
+2. **Browser opens immediately after broker is selected**
+3. Prompt: `Username:` — read from stdin (browser already visible in background)
+4. Prompt: `Password:` — read with plain `bufio.ReadString` (visible input)
+5. Write all values to `.env` automatically
+6. `Login()` runs: Rod navigates to login page and types username + password
+7. Prompt: `Enter auth code (TOTP / mobile app code):` — read from stdin
+8. Rod types the code and submits — proceeds with downloads
+
+This ensures the browser is always open before any credentials are typed, giving a consistent experience across all machines.
 
 ### Subsequent Runs
 
@@ -306,9 +309,11 @@ The Zerodha client ID (e.g. `BT2632`) is the same as the username. No separate e
 - Username field: `#userid`
 - Password field: `#password`
 - Submit button: `button[type='submit']`
-- TOTP field (second step): `[label='External TOTP']` — note: custom `label` attribute, NOT `aria-label`
-  - `type="number"`, `id="userid"` (reused), `maxlength="6"`
-  - Zerodha **auto-submits** when 6 digits are entered — use `rod.Try()` around `MustInput` to handle context cancel mid-navigation
+- 2FA field (second step): `input[type='number'][maxlength='6']` — matches all Zerodha 2FA methods
+  - `id="userid"` (reused from username field), `maxlength="6"`
+  - The `label` attribute varies by method: `External TOTP` for authenticator apps, different value for mobile app code — do NOT rely on `label`
+  - **TOTP**: auto-submits on 6th digit — use `rod.Try()` around `MustInput` to handle context cancel mid-navigation
+  - **Mobile app code**: does NOT auto-submit — click `button[type='submit']` after input; wrap in `rod.Try()` so it's harmless if TOTP already navigated away
 
 **Login button on console landing page (if present)**
 - Selector: `button.btn-blue`
@@ -341,6 +346,7 @@ For each pane:
 
 - Console landing page may or may not show "Login with Kite" button — code handles both with a 5s timeout
 - TOTP auto-submits on 6th digit entry causing navigation mid-`MustInput` — wrap with `rod.Try()`
+- Mobile app code does NOT auto-submit — always click `button[type='submit']` after typing; wrap in `rod.Try()` (no-op if TOTP already navigated)
 - `WaitNavigation()` must be set up BEFORE any click that triggers navigation
 - CSV link (`div.table-section a:nth-of-type(2)`) is absent when no trades exist — treat as RecordCount=0
 - **Rod saves downloaded files using the download GUID as filename**, NOT `SuggestedFilename`. Use `info.GUID` for the rename source path. `WaitDownload()` blocks until the file is fully written — no `.crdownload` polling needed.
@@ -349,7 +355,7 @@ For each pane:
 - Day selector: `td[title="YYYY-MM-DD"]` — most reliable, use `date.Format("2006-01-02")`
 - 5s delay between FY downloads required to avoid Zerodha rate limiting
 - Zerodha supports data from 2013-04-01 onwards (`not-before` attribute on datepicker)
-- **Post-login success detection**: URL polling is unreliable — Zerodha's redirect chain briefly passes through non-console URLs. Wait for `a[href*="tradebook"]` element instead; it only appears in the authenticated sidebar.
+- **Post-login success detection**: Primary: wait for `a[href*="tradebook"]` (30s timeout) — only appears in the authenticated sidebar. Fallback: if that element isn't present (account type variation), check `page.Info().URL` contains `console.zerodha.com` — being on console confirms login succeeded. Raw URL polling during the redirect chain is unreliable; only check URL after 2FA is submitted.
 
 ## Adding a New Broker
 
@@ -389,7 +395,7 @@ go run . --reset
 
 ## Build Status
 
-All phases complete and verified in production (account BT2632):
+All phases complete and verified in production:
 - Phase 1 ✅ Project setup
 - Phase 2 ✅ Core interface (brokers/broker.go)
 - Phase 3 ✅ Zerodha implementation — full end-to-end verified
@@ -397,6 +403,8 @@ All phases complete and verified in production (account BT2632):
 - Phase 5 ✅ Download manager — idempotency, FY scanning, boundary detection
 - Phase 6 ✅ Polish — --verbose, --broker, Ctrl+C
 - build.sh ✅ Cross-platform build script (mac-m1, mac-intel, windows.exe → ~/Downloads)
+- ✅ Consistent first-run flow: browser always opens before credential prompts (all machines)
+- ✅ Both Zerodha 2FA methods supported: TOTP (auto-submit) and mobile app code (explicit submit)
 
 **Not yet tested (requires waiting between runs):**
 - Subsequent run after N days: should re-download current FY only, skip all prior FYs. Logic is implemented and correct — `foundActiveFY=true` is set when skipping already-downloaded FYs, ensuring the historical boundary is correctly detected.
@@ -404,7 +412,7 @@ All phases complete and verified in production (account BT2632):
 ## Troubleshooting
 
 - **Login fails**: Check credentials in `.env`; use `--reset` to re-enter
-- **TOTP not accepted**: Enter the code in the terminal (not the browser); make sure your authenticator app is time-synced
+- **2FA code not accepted**: Enter the code in the terminal (not the browser); for TOTP make sure your authenticator app is time-synced; for mobile app code open the Zerodha app and use the code shown there
 - **Download hangs**: Run with `--headless=false` to see browser state
 - **Rate limited by Zerodha**: Wait a few minutes and re-run — already-downloaded FYs are skipped
 - **Want to change broker/credentials**: Run with `--reset` to clear `.env` and re-trigger setup
