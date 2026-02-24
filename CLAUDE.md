@@ -353,7 +353,9 @@ For each pane:
 - Date picker opened via JS: `() => document.querySelector('.mx-input-wrapper').click()` — SVG elements and their children do not work with `rod.MustClick()`
 - Year label selector: `{pane} a.mx-current-year` (not `a:nth-of-type(6)` as originally documented)
 - Day selector: `td[title="YYYY-MM-DD"]` — most reliable, use `date.Format("2006-01-02")`
-- 5s delay between FY downloads required to avoid Zerodha rate limiting
+- **Fresh tradebook navigation per FY**: `DownloadTradesForFY` navigates to the tradebook URL before each download — Zerodha's SPA caches previous search results, so reusing the same page causes stale CSV links to be downloaded
+- **WaitRequestIdle after search**: After clicking the search button, `page.WaitRequestIdle(2s)` is used instead of `time.Sleep` — the search API must complete and Vue must re-render before checking for the CSV link. Without this, the stale results from the auto-loaded page are grabbed instead of fresh results. Set up the idle listener BEFORE clicking search (Rod requirement).
+- 3s delay between FY downloads to avoid Zerodha rate limiting (reduced from 5s since fresh navigation adds its own delay)
 - Zerodha supports data from 2013-04-01 onwards (`not-before` attribute on datepicker)
 - **Post-login success detection**: Primary: wait for `a[href*="tradebook"]` (30s timeout) — only appears in the authenticated sidebar. Fallback: if that element isn't present (account type variation), check `page.Info().URL` contains `console.zerodha.com` — being on console confirms login succeeded. Raw URL polling during the redirect chain is unreliable; only check URL after 2FA is submitted.
 
@@ -405,6 +407,8 @@ All phases complete and verified in production:
 - build.sh ✅ Cross-platform build script (mac-m1, mac-intel, windows.exe → ~/Downloads)
 - ✅ Consistent first-run flow: browser always opens before credential prompts (all machines)
 - ✅ All three Zerodha 2FA methods supported: TOTP (auto-submit), SMS OTP (explicit submit), mobile app code (explicit submit)
+
+- ✅ Stale search results bug fixed: fresh tradebook navigation + WaitRequestIdle ensures each FY gets its own data
 
 **Not yet tested (requires waiting between runs):**
 - Subsequent run after N days: should re-download current FY only, skip all prior FYs. Logic is implemented and correct — `foundActiveFY=true` is set when skipping already-downloaded FYs, ensuring the historical boundary is correctly detected.

@@ -146,7 +146,6 @@ func main() {
 	foundActiveFY := false
 	consecutiveEmptyFYs := 0
 	maxEmptyFYsToCheck := 3
-
 	for {
 		// Skip already downloaded FYs (except current FY which may be incomplete).
 		// Setting foundActiveFY=true is critical: it tells the loop that records

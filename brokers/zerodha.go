@@ -159,8 +159,16 @@ func (z *ZerodhaBroker) DownloadTradesForFY(fy FinancialYear, downloadDir string
 		}
 	}
 
-	// Brief pause between FY downloads to avoid Zerodha rate limiting.
-	time.Sleep(5 * time.Second)
+	// Navigate to tradebook fresh each time — prevents stale results from a
+	// previous FY search being mistaken for new results.
+	z.debugLog("navigating to tradebook (fresh page)")
+	z.page.MustNavigate("https://console.zerodha.com/reports/tradebook")
+	if _, err := z.page.Timeout(20 * time.Second).Element("svg.mx-calendar-icon"); err != nil {
+		return nil, fmt.Errorf("tradebook date picker did not appear: %w", err)
+	}
+
+	// Brief pause to avoid Zerodha rate limiting.
+	time.Sleep(3 * time.Second)
 
 	// Open the date picker via JS — Rod's MustClick() hangs on SVG elements
 	// because it can't resolve their click geometry reliably.
@@ -191,9 +199,15 @@ func (z *ZerodhaBroker) DownloadTradesForFY(fy FinancialYear, downloadDir string
 	}
 	time.Sleep(500 * time.Millisecond)
 
+	// Set up network idle listener BEFORE clicking search — captures the API call
+	waitIdle := z.page.Timeout(15 * time.Second).WaitRequestIdle(2*time.Second, nil, nil, nil)
+
 	z.debugLog("clicking search button")
 	z.page.MustElement("div.one span").MustClick()
-	time.Sleep(2 * time.Second)
+
+	// Wait for search API to complete and Vue to re-render results
+	waitIdle()
+	z.debugLog("search results loaded (network idle)")
 
 	// Check for the CSV download link — absent when there are no trades
 	csvEl, err := z.page.Timeout(5 * time.Second).Element("div.table-section a:nth-of-type(2)")
