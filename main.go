@@ -19,9 +19,9 @@ import (
 )
 
 var (
-	headless      = flag.Bool("headless", true, "Run browser in headless mode")
-	verbose       = flag.Bool("verbose", false, "Enable verbose logging")
-	reset         = flag.Bool("reset", false, "Clear saved credentials and re-run setup")
+	headless       = flag.Bool("headless", true, "Run browser in headless mode")
+	verbose        = flag.Bool("verbose", false, "Enable verbose logging")
+	reset          = flag.Bool("reset", false, "Clear saved credentials and re-run setup")
 	brokerOverride = flag.String("broker", "", "Override broker from .env (e.g. zerodha)")
 )
 
@@ -129,69 +129,122 @@ func main() {
 		log.Fatalf("Failed to navigate to trade book: %v", err)
 	}
 
-	// Check which FYs are already downloaded
-	downloadedFYs, err := brokers.GetDownloadedFYs(downloadDir)
-	if err != nil {
-		log.Fatalf("Failed to scan downloads: %v", err)
+	// Download both segments in a single FY loop — set dates once per FY,
+	// then switch segment dropdown for each. Each segment has independent boundary detection.
+	allResults := downloadAllSegments(broker, downloadDir, accountNumber)
+	printSummary(allResults)
+}
+
+// segState tracks backward-scan boundary detection for one segment (EQ or FO).
+// Each segment has independent state because F&O activity can exist without equity
+// trades and vice versa.
+type segState struct {
+	done             bool              // true once historical boundary is reached
+	foundActive      bool              // true once any FY with records is found
+	consecutiveEmpty int               // consecutive zero-record FYs (resets on prompt)
+	downloaded       map[string]string // FY label → filename for already-downloaded FYs
+}
+
+// downloadAllSegments iterates FYs backward from the current FY, downloading both
+// EQ and FO in a single navigation per FY:
+//   - Date picker is set once per FY (while on default EQ segment)
+//   - Commit search locks dates into Vue state
+//   - EQ downloads from commit search results; FO switches dropdown and re-searches
+//   - Each segment tracks its own historical boundary independently
+//
+// Stops when all segments have reached their boundary (zero records after an active FY).
+func downloadAllSegments(broker brokers.Broker, downloadDir string, accountNumber string) []*brokers.DownloadResult {
+	segments := []brokers.Segment{brokers.SegmentEQ, brokers.SegmentFO}
+	states := make(map[brokers.Segment]*segState)
+	for _, seg := range segments {
+		downloaded, err := brokers.GetDownloadedFYs(downloadDir, seg)
+		if err != nil {
+			log.Printf("Failed to scan downloads for %s: %v", string(seg), err)
+			downloaded = make(map[string]string)
+		}
+		if *verbose {
+			log.Printf("Found %d existing %s downloads", len(downloaded), string(seg))
+		}
+		states[seg] = &segState{downloaded: downloaded}
 	}
 
-	if *verbose {
-		log.Printf("Found %d existing downloads", len(downloadedFYs))
-	}
-
-	// Download logic
-	var results []*brokers.DownloadResult
+	var allResults []*brokers.DownloadResult
 	currentFY := brokers.CurrentFY()
 	fy := currentFY
-	foundActiveFY := false
-	consecutiveEmptyFYs := 0
 	maxEmptyFYsToCheck := 3
+
 	for {
-		// Skip already downloaded FYs (except current FY which may be incomplete).
-		// Setting foundActiveFY=true is critical: it tells the loop that records
-		// exist in this region so hitting 0 records further back means boundary.
-		if _, exists := downloadedFYs[fy.Label]; exists && fy.Label != currentFY.Label {
-			if *verbose {
-				log.Printf("Skipping %s (already downloaded)", fy.Label)
-			}
-			foundActiveFY = true
-			fy = brokers.PreviousFY(fy)
-			continue
-		}
-
-		log.Printf("Downloading trades for %s...", fy.Label)
-		result, err := broker.DownloadTradesForFY(fy, downloadDir, accountNumber)
-		if err != nil {
-			log.Printf("Error downloading %s: %v", fy.Label, err)
-			fy = brokers.PreviousFY(fy)
-			continue
-		}
-
-		if result.RecordCount == 0 {
-			consecutiveEmptyFYs++
-			if !foundActiveFY {
-				if consecutiveEmptyFYs >= maxEmptyFYsToCheck {
-					if !promptContinue("No records found. Check 3 more financial years?") {
-						log.Println("Stopping search")
-						break
-					}
-					consecutiveEmptyFYs = 0
-				}
-			} else {
-				log.Printf("No records in %s. Reached historical boundary.", fy.Label)
+		// Stop when all segments have reached their boundary
+		allDone := true
+		for _, seg := range segments {
+			if !states[seg].done {
+				allDone = false
 				break
 			}
-		} else {
-			foundActiveFY = true
-			consecutiveEmptyFYs = 0
-			results = append(results, result)
-			log.Printf("Downloaded %s: %d records", result.Filename, result.RecordCount)
+		}
+		if allDone {
+			break
+		}
+
+		// Determine which segments need downloading for this FY
+		var toDownload []brokers.Segment
+		for _, seg := range segments {
+			st := states[seg]
+			if st.done {
+				continue
+			}
+			// Skip already downloaded FYs (except current FY which may be incomplete)
+			if _, exists := st.downloaded[fy.Label]; exists && fy.Label != currentFY.Label {
+				if *verbose {
+					log.Printf("Skipping %s %s (already downloaded)", string(seg), fy.Label)
+				}
+				st.foundActive = true
+				continue
+			}
+			toDownload = append(toDownload, seg)
+		}
+
+		if len(toDownload) > 0 {
+			segNames := make([]string, len(toDownload))
+			for i, s := range toDownload {
+				segNames[i] = string(s)
+			}
+			log.Printf("Downloading %s trades for %s...", strings.Join(segNames, "+"), fy.Label)
+
+			results, err := broker.DownloadTradesForFY(fy, downloadDir, accountNumber, toDownload)
+			if err != nil {
+				log.Printf("Error downloading %s: %v", fy.Label, err)
+			} else {
+				for _, result := range results {
+					st := states[result.Segment]
+					if result.RecordCount == 0 {
+						st.consecutiveEmpty++
+						if !st.foundActive {
+							if st.consecutiveEmpty >= maxEmptyFYsToCheck {
+								if !promptContinue(fmt.Sprintf("No %s records found in %d FYs. Check 3 more?", string(result.Segment), maxEmptyFYsToCheck)) {
+									log.Printf("Stopping %s search", string(result.Segment))
+									st.done = true
+								}
+								st.consecutiveEmpty = 0
+							}
+						} else {
+							log.Printf("No %s records in %s. Reached historical boundary.", string(result.Segment), fy.Label)
+							st.done = true
+						}
+					} else {
+						st.foundActive = true
+						st.consecutiveEmpty = 0
+						allResults = append(allResults, result)
+						log.Printf("Downloaded %s: %d records", result.Filename, result.RecordCount)
+					}
+				}
+			}
 		}
 
 		fy = brokers.PreviousFY(fy)
 	}
 
-	printSummary(results)
+	return allResults
 }
 
 // selectBroker shows the broker menu and returns the chosen broker name.
@@ -271,7 +324,7 @@ func printSummary(results []*brokers.DownloadResult) {
 
 	totalRecords := 0
 	for _, r := range results {
-		fmt.Printf("  %s - %d records\n", r.Filename, r.RecordCount)
+		fmt.Printf("  [%s] %s - %d records\n", string(r.Segment), r.Filename, r.RecordCount)
 		totalRecords += r.RecordCount
 	}
 

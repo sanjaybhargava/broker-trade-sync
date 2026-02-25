@@ -144,98 +144,123 @@ func (z *ZerodhaBroker) NavigateToTradeBook() error {
 	return nil
 }
 
-// DownloadTradesForFY downloads the CSV for a specific financial year.
-// Returns RecordCount=0 if no trades exist for that FY.
-func (z *ZerodhaBroker) DownloadTradesForFY(fy FinancialYear, downloadDir string, accountNumber string) (*DownloadResult, error) {
-	targetFilename := GenerateCSVFilename(accountNumber, fy)
-	targetPath := filepath.Join(downloadDir, targetFilename)
-
-	// Skip if already downloaded — except current FY which may be incomplete
-	currentFY := CurrentFY()
-	if fy.Label != currentFY.Label {
-		if _, err := os.Stat(targetPath); err == nil {
-			recordCount, _ := countCSVRecords(targetPath)
-			return &DownloadResult{Filename: targetFilename, RecordCount: recordCount, FY: fy}, nil
-		}
-	}
-
-	// Navigate to tradebook fresh each time — prevents stale results from a
-	// previous FY search being mistaken for new results.
+// DownloadTradesForFY downloads CSVs for a specific FY across the given segments.
+//
+// Flow per FY (single browser navigation):
+//  1. Navigate to tradebook (fresh page, resets SPA state)
+//  2. Open date picker, select start/end dates (while on default EQ segment)
+//  3. Click search — "commit search" that locks dates into Vue's internal state
+//  4. For EQ: download CSV from the commit search results
+//  5. For FO: switch segment dropdown, click search again, download CSV
+//
+// The commit search in step 3 is critical: without it, switching the segment
+// dropdown triggers a Vue auto-search using default/stale dates, not our custom
+// dates. This caused a production bug where FO downloads got wrong-FY data.
+func (z *ZerodhaBroker) DownloadTradesForFY(fy FinancialYear, downloadDir string, accountNumber string, segments []Segment) ([]*DownloadResult, error) {
 	z.debugLog("navigating to tradebook (fresh page)")
 	z.page.MustNavigate("https://console.zerodha.com/reports/tradebook")
 	if _, err := z.page.Timeout(20 * time.Second).Element("svg.mx-calendar-icon"); err != nil {
-		return nil, fmt.Errorf("tradebook date picker did not appear: %w", err)
+		return nil, fmt.Errorf("tradebook page did not load: %w", err)
 	}
 
-	// Brief pause to avoid Zerodha rate limiting.
+	// Rate-limit pause — Zerodha throttles rapid requests.
 	time.Sleep(3 * time.Second)
 
-	// Open the date picker via JS — Rod's MustClick() hangs on SVG elements
-	// because it can't resolve their click geometry reliably.
-	z.debugLog("clicking .mx-input-wrapper to open date picker")
+	// --- Date picker ---
+	// Opened via JS because Rod's MustClick() hangs on SVG elements (no geometry).
+	z.debugLog("opening date picker")
 	z.page.MustEval(`() => document.querySelector('.mx-input-wrapper').click()`)
-
-	z.debugLog("waiting for date picker popup")
 	if err := z.page.MustElement(".mx-datepicker-popup").WaitVisible(); err != nil {
 		return nil, fmt.Errorf("date picker did not open: %w", err)
 	}
-	z.debugLog("date picker open")
 
-	// Use today as end date for current FY — the FY end (Mar 31) may be in the
-	// future and the calendar won't allow clicking future dates.
+	// Clamp end date to today for the current FY (calendar rejects future dates).
 	startDate := fy.StartDate
 	endDate := fy.EndDate
 	if endDate.After(time.Now()) {
 		endDate = time.Now()
 	}
 
-	z.debugLog("selecting start date %s", startDate.Format("2006-01-02"))
+	z.debugLog("selecting dates %s to %s", startDate.Format("2006-01-02"), endDate.Format("2006-01-02"))
 	if err := z.selectCalendarDate(1, startDate); err != nil {
 		return nil, fmt.Errorf("selecting start date: %w", err)
 	}
-	z.debugLog("selecting end date %s", endDate.Format("2006-01-02"))
 	if err := z.selectCalendarDate(2, endDate); err != nil {
 		return nil, fmt.Errorf("selecting end date: %w", err)
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	// Set up network idle listener BEFORE clicking search — captures the API call
-	waitIdle := z.page.Timeout(15 * time.Second).WaitRequestIdle(2*time.Second, nil, nil, nil)
-
-	z.debugLog("clicking search button")
+	// --- Commit search: lock the date range into Vue state ---
+	// WaitRequestIdle listener must be set up BEFORE the click (Rod requirement).
+	waitCommit := z.page.Timeout(15*time.Second).WaitRequestIdle(2*time.Second, nil, nil, nil)
+	z.debugLog("commit search (locking date range)")
 	z.page.MustElement("div.one span").MustClick()
+	waitCommit()
+	z.debugLog("date range committed")
 
-	// Wait for search API to complete and Vue to re-render results
-	waitIdle()
-	z.debugLog("search results loaded (network idle)")
+	// --- Download each segment ---
+	var results []*DownloadResult
+	for _, segment := range segments {
+		targetFilename := GenerateCSVFilename(accountNumber, fy, segment)
+		targetPath := filepath.Join(downloadDir, targetFilename)
 
-	// Check for the CSV download link — absent when there are no trades
-	csvEl, err := z.page.Timeout(5 * time.Second).Element("div.table-section a:nth-of-type(2)")
-	if err != nil {
-		return &DownloadResult{Filename: targetFilename, RecordCount: 0, FY: fy}, nil
+		// EQ results are already loaded from the commit search.
+		// For other segments: switch dropdown and re-search with committed dates.
+		if segment != SegmentEQ {
+			z.debugLog("switching to segment %s", string(segment))
+			z.page.MustEval(`(val) => {
+				const sel = document.querySelector('select');
+				sel.value = val;
+				sel.dispatchEvent(new Event('change', { bubbles: true }));
+			}`, string(segment))
+			time.Sleep(500 * time.Millisecond)
+
+			waitIdle := z.page.Timeout(15*time.Second).WaitRequestIdle(2*time.Second, nil, nil, nil)
+			z.debugLog("searching for %s", string(segment))
+			z.page.MustElement("div.one span").MustClick()
+			waitIdle()
+			z.debugLog("%s results loaded", string(segment))
+		}
+
+		// CSV link is absent when no trades exist for this segment/date range.
+		csvEl, err := z.page.Timeout(5 * time.Second).Element("div.table-section a:nth-of-type(2)")
+		if err != nil {
+			results = append(results, &DownloadResult{
+				Filename: targetFilename, RecordCount: 0, FY: fy, Segment: segment,
+			})
+			continue
+		}
+
+		// Rod saves downloads as <GUID> — WaitDownload blocks until fully written.
+		wait := z.browser.WaitDownload(downloadDir)
+		csvEl.MustClick()
+		info := wait()
+
+		downloadedPath := filepath.Join(downloadDir, info.GUID)
+		if err := os.Rename(downloadedPath, targetPath); err != nil {
+			z.debugLog("rename failed for %s: %v", string(segment), err)
+			results = append(results, &DownloadResult{
+				Filename: targetFilename, RecordCount: 0, FY: fy, Segment: segment,
+			})
+			continue
+		}
+
+		recordCount, _ := countCSVRecords(targetPath)
+		if recordCount == 0 {
+			os.Remove(targetPath)
+		}
+		results = append(results, &DownloadResult{
+			Filename: targetFilename, RecordCount: recordCount, FY: fy, Segment: segment,
+		})
 	}
 
-	// Intercept the download before clicking. Rod saves the file using the
-	// download GUID as filename (not the suggested filename).
-	wait := z.browser.WaitDownload(downloadDir)
-	csvEl.MustClick()
-	info := wait() // blocks until download is complete and file is written
-
-	// Rod writes the file as <GUID> in downloadDir — rename to our convention
-	downloadedPath := filepath.Join(downloadDir, info.GUID)
-	if err := os.Rename(downloadedPath, targetPath); err != nil {
-		return nil, fmt.Errorf("renaming downloaded file: %w", err)
-	}
-
-	recordCount, _ := countCSVRecords(targetPath)
-	if recordCount == 0 {
-		os.Remove(targetPath) // don't keep empty CSV files
-	}
-	return &DownloadResult{Filename: targetFilename, RecordCount: recordCount, FY: fy}, nil
+	return results, nil
 }
 
-// selectCalendarDate navigates the vue2-datepicker calendar pane (1=left/From, 2=right/To)
-// to the given date and clicks it. Flow: click year label → pick year → pick month → pick day.
+// selectCalendarDate navigates the vue2-datepicker range picker to a specific date.
+// pane: 1=left (From), 2=right (To). Flow: year label → year → month → day.
+// The year panel shows ~10 years at a time; if the target year isn't visible,
+// the picker navigates forward or backward by decade until found.
 func (z *ZerodhaBroker) selectCalendarDate(pane int, date time.Time) error {
 	paneSelector := fmt.Sprintf("div.mx-range-wrapper > div:nth-of-type(%d)", pane)
 
@@ -243,11 +268,11 @@ func (z *ZerodhaBroker) selectCalendarDate(pane int, date time.Time) error {
 	z.page.MustElement(paneSelector + " a.mx-current-year").MustClick()
 	time.Sleep(300 * time.Millisecond)
 
-	// Find and click the target year span; navigate decade if not visible
 	targetYear := date.Year()
-	for attempt := 0; attempt < 5; attempt++ {
+	for attempt := 0; attempt < 10; attempt++ {
 		spans := z.page.MustElements(paneSelector + " .mx-panel-year span")
 		found := false
+		minYear, maxYear := 9999, 0
 		for _, span := range spans {
 			y, _ := strconv.Atoi(strings.TrimSpace(span.MustText()))
 			if y == targetYear {
@@ -255,14 +280,24 @@ func (z *ZerodhaBroker) selectCalendarDate(pane int, date time.Time) error {
 				found = true
 				break
 			}
+			if y < minYear {
+				minYear = y
+			}
+			if y > maxYear {
+				maxYear = y
+			}
 		}
 		if found {
 			break
 		}
-		if attempt == 4 {
+		if attempt == 9 {
 			return fmt.Errorf("year %d not found in date picker", targetYear)
 		}
-		z.page.MustElement(paneSelector + " .mx-calendar-header a.mx-icon-last-year").MustClick()
+		if targetYear > maxYear {
+			z.page.MustElement(paneSelector + " .mx-calendar-header a.mx-icon-next-year").MustClick()
+		} else {
+			z.page.MustElement(paneSelector + " .mx-calendar-header a.mx-icon-last-year").MustClick()
+		}
 		time.Sleep(300 * time.Millisecond)
 	}
 	time.Sleep(300 * time.Millisecond)
@@ -290,7 +325,7 @@ func (z *ZerodhaBroker) Close() error {
 	return nil
 }
 
-// countCSVRecords counts the number of data rows in a CSV file
+// countCSVRecords counts data rows (excludes header) in a CSV file.
 func countCSVRecords(filePath string) (int, error) {
 	file, err := os.Open(filePath)
 	if err != nil {

@@ -44,42 +44,37 @@ package brokers
 
 import "time"
 
-// FinancialYear represents a FY with start and end dates
+type Segment string
+
+const (
+    SegmentEQ Segment = "EQ" // Equity
+    SegmentFO Segment = "FO" // Futures and Options
+)
+
 type FinancialYear struct {
     Label     string    // e.g., "FY2023-24"
     StartDate time.Time // April 1
-    EndDate   time.Time // March 31
+    EndDate   time.Time // March 31 of next year
 }
 
-// DownloadResult represents the outcome of a CSV download
 type DownloadResult struct {
     Filename    string
     RecordCount int
     FY          FinancialYear
+    Segment     Segment
 }
 
-// Broker defines the interface all broker implementations must satisfy
 type Broker interface {
-    // Name returns the broker identifier (e.g., "zerodha")
     Name() string
-
-    // Login opens browser, navigates to login page, prompts user for auth code at runtime
-    // authCode supports any method: TOTP, SMS OTP, email OTP
-    // Returns error if login fails
     Login(username, password, authCode string) error
-
-    // NavigateToTradeBook navigates to the trade history/book section
     NavigateToTradeBook() error
 
-    // DownloadTradesForFY downloads the CSV for a specific financial year
-    // Returns the result with filename and record count
-    // Returns RecordCount=0 if no trades exist for that FY
-    DownloadTradesForFY(fy FinancialYear, downloadDir string, accountNumber string) (*DownloadResult, error)
+    // DownloadTradesForFY downloads CSVs for one FY across the given segments.
+    // Single navigation: sets date range once, then iterates segments via dropdown.
+    // Returns one DownloadResult per segment. RecordCount=0 means no trades.
+    DownloadTradesForFY(fy FinancialYear, downloadDir string, accountNumber string, segments []Segment) ([]*DownloadResult, error)
 
-    // GetAccountNumber extracts the account/client ID from the logged-in session
     GetAccountNumber() (string, error)
-
-    // Close cleans up browser resources
     Close() error
 }
 ```
@@ -92,33 +87,48 @@ type Broker interface {
 - Current FY calculation: If month >= April, FY starts this year; else FY started last year
 - FY label format: `FY2023-24` for April 2023 to March 2024
 
-### First Run Download Logic
+### Multi-Segment Download Logic
 
-1. Start from current financial year
-2. Attempt download for each FY going backwards
-3. If FY has zero records:
-   - If no active FY found yet: prompt user "No records found. Check 3 more financial years?"
-   - If active FY was already found: STOP (this is the boundary)
-4. Continue until zero-record FY marks the historical boundary
+A **single backward-scanning FY loop** downloads both EQ and FO per financial year:
+
+1. For each FY (starting from current, going backward):
+   a. Determine which segments still need downloading (skip already-downloaded, skip segments that hit boundary)
+   b. Navigate to tradebook (fresh page), open date picker, set date range
+   c. **Commit search**: click search on default EQ segment to lock dates into Vue state
+   d. Download EQ CSV from the commit search results
+   e. Switch segment dropdown to FO, click search again, download FO CSV
+2. Each segment tracks its own boundary independently — FO can have trades in FYs where EQ doesn't, and vice versa
+
+**Commit search** (step c) is critical: without it, switching the segment dropdown triggers a Vue auto-search using default/stale dates instead of the custom dates set in step b. This caused a production bug where FO downloads received wrong-FY data.
+
+### Boundary Detection (per segment, independent)
+
+- If a FY has zero records and an active FY was already found earlier: **STOP** (historical boundary)
+- If a FY has zero records and no active FY found yet: after 3 consecutive empty FYs, prompt user "Check 3 more?"
+- Already-downloaded FYs (from prior runs) count as "active" for boundary detection
 
 ### Subsequent Run Logic
 
-1. Scan `downloads/` folder for existing files
+1. Scan `~/Downloads` for existing CSVs matching each segment
 2. Parse filenames to determine which FYs are already downloaded
-3. Only download missing FYs (between earliest downloaded and current)
-4. Re-download current FY if incomplete (ongoing year)
+3. Skip those — only download missing FYs
+4. Always re-download current FY (ongoing year may have new trades)
 
 ### CSV Naming Convention
 
 ```
-<accountnumber>_<fromdate>_<todate>.csv
+<accountnumber>_<segment>_<fromdate>_<todate>.csv
 ```
 
-Example: `ZX1234_20230401_20240331.csv`
+Examples:
+- Equity: `ZX1234_EQ_20230401_20240331.csv`
+- F&O: `ZX1234_FO_20230401_20240331.csv`
 
+- Segment: `EQ` (Equity) or `FO` (Futures and Options)
 - Dates in `YYYYMMDD` format
 - Account number from broker session
 - Enables idempotent checks by filename parsing
+- Backward compatible: old-format files without segment (e.g., `ZX1234_20230401_20240331.csv`) are treated as EQ
 
 ## Dependencies
 
@@ -223,7 +233,7 @@ if err != nil {
 2. Implement `FinancialYear` helper functions:
    - `CurrentFY() FinancialYear`
    - `PreviousFY(fy FinancialYear) FinancialYear`
-   - `ParseFYFromFilename(filename string) (*FinancialYear, string, error)`
+   - `ParseFYFromFilename(filename string) (*FinancialYear, string, Segment, error)`
 
 ### Phase 3: Zerodha Implementation
 
@@ -320,6 +330,10 @@ The Zerodha client ID (e.g. `BT2632`) is the same as the username. No separate e
 - Must set up `MustWaitNavigation()` BEFORE clicking — button navigates to Kite login page
 
 **Trade book page**
+- Segment dropdown: `select` — native HTML `<select>` element, only one on the page
+  - Values: `EQ` (Equity, default), `FO` (Futures and Options), `CDS`, `COM`, `MF`, `EQX`, `MFX`
+  - Switched via JS: `sel.value = 'FO'; sel.dispatchEvent(new Event('change', {bubbles: true}))` — Rod's `MustSelect` matches by text not value
+  - No action needed for EQ — it's the default on fresh navigation
 - Date range input (opens picker): `div.three input`
 - Clear date selection: `span.mx-clear-wrapper`
 - Preset buttons (visible after opening picker):
@@ -328,7 +342,7 @@ The Zerodha client ID (e.g. `BT2632`) is the same as the username. No separate e
 - Search/filter button: `div.one span`
 - CSV download link: `div.table-section a:nth-of-type(2)` (aria-label "CSV")
 
-**Date picker — manual calendar navigation (for FYs older than prev FY)**
+**Date picker — manual calendar navigation**
 
 The date picker is a vue2-datepicker range picker with left (From) and right (To) calendar panes.
 
@@ -336,11 +350,13 @@ Left pane selector: `div.mx-range-wrapper > div:nth-of-type(1)`
 Right pane selector: `div.mx-range-wrapper > div:nth-of-type(2)`
 
 For each pane:
-1. Click year label link: `{pane} a:nth-of-type(6)` — opens year picker panel
-2. Year panel: `div.mx-calendar-panel-year .mx-panel-year span` — shows ~10 years; click matching text
-3. If target year not visible, click previous decade: `div.mx-calendar-panel-year a.mx-icon-last-year`
-4. Month panel (appears after year click): `div.mx-calendar-panel-month .mx-panel-month > span:nth-of-type(N)` where N = month number (1=Jan, 4=Apr, 3=Mar)
-5. Day cells: `{pane} table tbody td.cur-month` — iterate and click matching day number
+1. Click year label: `{pane} a.mx-current-year` — opens year picker panel
+2. Year panel: `{pane} .mx-panel-year span` — shows ~10 years; click matching text
+3. If target year not visible:
+   - Forward: `{pane} .mx-calendar-header a.mx-icon-next-year`
+   - Backward: `{pane} .mx-calendar-header a.mx-icon-last-year`
+4. Month panel: `{pane} .mx-panel-month span:nth-of-type(N)` where N = month number (1=Jan, 4=Apr)
+5. Day cell: `td[title="YYYY-MM-DD"]` — unambiguous, use `date.Format("2006-01-02")`
 
 ### Known Behaviors (verified in production)
 
@@ -358,6 +374,10 @@ For each pane:
 - 3s delay between FY downloads to avoid Zerodha rate limiting (reduced from 5s since fresh navigation adds its own delay)
 - Zerodha supports data from 2013-04-01 onwards (`not-before` attribute on datepicker)
 - **Post-login success detection**: Primary: wait for `a[href*="tradebook"]` (30s timeout) — only appears in the authenticated sidebar. Fallback: if that element isn't present (account type variation), check `page.Info().URL` contains `console.zerodha.com` — being on console confirms login succeeded. Raw URL polling during the redirect chain is unreliable; only check URL after 2FA is submitted.
+- **Segment dropdown**: Native `<select>` element on tradebook page. Switched via JS `dispatchEvent('change')` because Rod's `MustSelect` matches by option text (regex), not by value — `"FO"` wouldn't match `"Futures & Options"`. EQ is the default after fresh navigation — no interaction needed for EQ. Segment is switched AFTER the commit search (dates must be committed to Vue state first).
+- **Commit search pattern**: After setting dates in the date picker, always click the search button once (with default EQ segment) before switching segments. This commits the date range to Vue's internal state. Without this, the dropdown `change` event triggers a Vue auto-search with default/stale dates. Discovered via production bug: FO FY2023-24 download received FY2024-25 data because dates weren't committed.
+- **Single-loop multi-segment download**: One backward FY loop downloads both EQ and FO per FY in a single navigation. Each segment tracks its own historical boundary independently. F&O activity can exist without equity trades (e.g., covered calls).
+- **Year picker bidirectional navigation**: The year panel shows ~10 years. If the target year is ahead of the visible range, navigate forward (`a.mx-icon-next-year`); if behind, navigate backward (`a.mx-icon-last-year`). Up to 10 attempts. Previous code only navigated backward, which failed when the FO segment dropdown caused the year panel to show an older decade.
 
 ## Adding a New Broker
 
@@ -407,10 +427,15 @@ All phases complete and verified in production:
 - build.sh ✅ Cross-platform build script (mac-m1, mac-intel, windows.exe → ~/Downloads)
 - ✅ Consistent first-run flow: browser always opens before credential prompts (all machines)
 - ✅ All three Zerodha 2FA methods supported: TOTP (auto-submit), SMS OTP (explicit submit), mobile app code (explicit submit)
+- ✅ Stale search results fixed: fresh navigation + commit search + WaitRequestIdle
+- ✅ Multi-segment support: single FY loop downloads EQ+FO per FY with independent boundary detection
+- ✅ CSV naming includes segment: `ACCOUNT_EQ_FROM_TO.csv` / `ACCOUNT_FO_FROM_TO.csv`
+- ✅ Backward compatible: old-format files (no segment) treated as EQ
+- ✅ F&O segment dropdown verified on live tradebook page (FY2020-21 through FY2024-25)
+- ✅ Commit search pattern prevents stale-date bug when switching segments
+- ✅ Year picker bidirectional navigation (forward + backward through decades)
 
-- ✅ Stale search results bug fixed: fresh tradebook navigation + WaitRequestIdle ensures each FY gets its own data
-
-**Not yet tested (requires waiting between runs):**
+**Not yet tested (requires live run):**
 - Subsequent run after N days: should re-download current FY only, skip all prior FYs. Logic is implemented and correct — `foundActiveFY=true` is set when skipping already-downloaded FYs, ensuring the historical boundary is correctly detected.
 
 ## Troubleshooting

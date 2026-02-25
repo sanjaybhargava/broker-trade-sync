@@ -6,7 +6,7 @@ A Go CLI bot that automates downloading trade history CSVs from broker web conso
 
 - Interactive first-run setup — no manual config file editing
 - Login with runtime TOTP/SMS OTP/mobile app code prompt (auth code never stored)
-- Downloads trade CSVs for every financial year (Indian FY: Apr 1 - Mar 31)
+- Downloads **Equity (EQ)** and **F&O (FO)** trade CSVs for every financial year (Indian FY: Apr 1 - Mar 31)
 - Idempotent — re-running skips already-downloaded FYs, always refreshes current FY
 - Files saved to your `~/Downloads` folder
 - Adapter pattern — supports multiple brokers from one codebase
@@ -56,15 +56,15 @@ go run . --broker=zerodha
 
 ### First Run
 1. Prompts for broker, username, password — saves to `.env`
-2. Prompts for TOTP/SMS OTP/mobile app code at login (never stored)
+2. Opens browser, prompts for TOTP/SMS OTP/mobile app code at login (never stored)
 3. Starts from current financial year, goes backward FY by FY
-4. Downloads CSV for each FY that has trades
-5. Stops when it finds a FY with no trading activity
+4. Downloads both Equity and F&O CSVs for each FY that has trades
+5. Stops each segment independently when it finds a FY with no trading activity
 
 ### Subsequent Runs
 1. Loads credentials silently from `.env`
 2. Prompts for TOTP/OTP at login
-3. Scans `~/Downloads` to find already-downloaded FYs
+3. Scans `~/Downloads` to find already-downloaded FYs (per segment)
 4. Skips those — only downloads missing FYs
 5. Always re-downloads current FY (ongoing year may have new trades)
 
@@ -73,10 +73,12 @@ go run . --broker=zerodha
 CSVs are saved to your `~/Downloads` folder with this naming convention:
 
 ```
-<account_number>_<from_date>_<to_date>.csv
+<account_number>_<segment>_<from_date>_<to_date>.csv
 ```
 
-Example: `BT2632_20230401_20240331.csv`
+Examples:
+- `BT2632_EQ_20230401_20240331.csv` (Equity, FY2023-24)
+- `BT2632_FO_20230401_20240331.csv` (F&O, FY2023-24)
 
 Dates are in `YYYYMMDD` format. Filenames are parsed on subsequent runs to detect what's already downloaded — moving or renaming files will cause them to be re-downloaded.
 
@@ -97,7 +99,6 @@ broker-trade-sync/
 ## Security
 
 - Credentials stored in `.env` (gitignored, never committed)
-- Password input is hidden during setup
 - TOTP/SMS OTP/mobile app code prompted at runtime and never stored anywhere
 - All data stays on your machine — no external services involved
 
@@ -105,7 +106,8 @@ broker-trade-sync/
 
 1. Create `brokers/<brokername>.go` using `package brokers`
 2. Implement the `Broker` interface (see `brokers/broker.go`)
-3. Register it in an `init()` function with the updated signature: `RegisterBroker("name", func(headless bool, verbose bool) (Broker, error) { ... })`
+   - Key method: `DownloadTradesForFY(fy, downloadDir, accountNumber, segments []Segment) ([]*DownloadResult, error)`
+3. Register in `init()`: `RegisterBroker("name", func(headless, verbose bool) (Broker, error) { ... })`
 4. Add broker-specific env vars to `.env.example`
 
 See `brokers/zerodha.go` as a reference implementation.
