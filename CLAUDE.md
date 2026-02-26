@@ -388,6 +388,8 @@ For each pane:
 - **Error-resilient boundary detection**: When `DownloadTradesForFY` returns an error, 0-record results are synthesized for all requested segments so `consecutiveEmpty` increments and boundary detection continues correctly.
 - **CSV click/href via page-level JS**: All interactions with the CSV download link use `Page.Eval` with `document.querySelector(selector)` instead of `Element.MustEval` or `Element.MustClick`. This avoids three Rod quirks: (1) `Element.Eval` passes element as `this`, not as function arg — arrow functions `(el) => el.click()` get `el=undefined`; (2) `Element.MustClick` retries forever on obscured elements; (3) `Timeout(N).Element()` attaches deadline to returned element — subsequent `MustClick`/`MustEval` inherit and panic on expiry. Click errors return 0-record result gracefully.
 - **Simplified boundary detection**: No per-segment boundary tracking or user prompts. All segments are checked for every FY. Stop when ALL segments have 0 records for 2 consecutive FYs. No hard floor. Handles accounts where FO data exists only in older FYs (e.g., a few F&O trades years ago, recent activity is EQ-only).
+- **Account-scoped idempotency**: `GetDownloadedFYs` filters by `accountNumber` — CSV files from other accounts in `~/Downloads` are ignored. Without this, running for multiple accounts caused cross-account FY skipping.
+- **CSV download retry on timeout**: The Zerodha JS click handler intermittently fails to trigger a download (observed on FO segments). The code retries the click once (max 2 attempts, 30s timeout each) before returning 0 records. Logs show `(attempt 1/2) — retrying click` on first timeout.
 
 ## Adding a New Broker
 
@@ -446,15 +448,16 @@ All phases complete and verified in production:
 - ✅ Year picker bidirectional navigation (forward + backward through decades)
 - ✅ Segment dropdown reset to EQ after fresh navigation (SPA persists last selection)
 - ✅ Race-based result detection: CSV link vs "Report's empty" text (replaces CSV-timeout)
-- ✅ Verified on two accounts: BT2632 (user's account, EQ+FO), CI8364 (wife's account, EQ only, light trader)
+- ✅ Verified on three accounts: BT2632 (user's account, EQ+FO), CI8364 (wife's account, EQ only, light trader), ZY7393 (third-party, heavy FO trader)
 - ✅ Robustness hardening: stale DOM race fix, calendar timeouts, GUID cleanup, error-resilient boundary detection, CSV error logging, JS null-checks
 - ✅ Page-level JS for CSV click/href (avoids Element.Eval `this` binding quirk, MustClick hang, and timeout context inheritance)
 - ✅ Simplified boundary detection: all segments checked every FY, stop when all empty for 2 consecutive FYs, no prompts
+- ✅ Account-scoped idempotency: `GetDownloadedFYs` filters by account number — prevents cross-account CSV files from causing FY skips
+- ✅ CSV download retry: on download timeout (JS click handler intermittently fails), retries click once before giving up
+- ✅ Full end-to-end clean run verified on ZY7393: 17 files (9 EQ + 8 FO), FY2017-18 through FY2025-26
 
 **Not yet tested (requires live run):**
-- Full end-to-end run with all robustness fixes (final binary built 2026-02-26 ~12:30). EQ downloads verified working in partial runs on CI8364. Need clean run from start to finish.
 - Subsequent run after N days: should re-download current FY only, skip all prior FYs. Logic is implemented and correct — `foundActiveFY=true` is set when skipping already-downloaded FYs, ensuring the historical boundary is correctly detected.
-- Full run on BT2632 (user's account, EQ+FO) — verifies FO download path works with actual FO data. Expected: ~5 EQ files + 1 FO file.
 
 ## Troubleshooting
 
