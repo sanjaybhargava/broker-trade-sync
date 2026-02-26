@@ -101,11 +101,13 @@ A **single backward-scanning FY loop** downloads both EQ and FO per financial ye
 
 **Commit search** (step c) is critical: without it, switching the segment dropdown triggers a Vue auto-search using default/stale dates instead of the custom dates set in step b. This caused a production bug where FO downloads received wrong-FY data.
 
-### Boundary Detection (per segment, independent)
+### Boundary Detection
 
-- If a FY has zero records and an active FY was already found earlier: **STOP** (historical boundary)
-- If a FY has zero records and no active FY found yet: after 3 consecutive empty FYs, prompt user "Check 3 more?"
-- Already-downloaded FYs (from prior runs) count as "active" for boundary detection
+- All segments (EQ, FO) are checked for every FY — no per-segment boundary tracking
+- If ANY segment has data in a FY (downloaded or freshly found), the consecutive-empty counter resets
+- Stop when ALL segments have zero records for **2 consecutive FYs** (historical boundary)
+- No user prompts — fully automatic
+- Already-downloaded FYs count as "has data" for boundary detection
 
 ### Subsequent Run Logic
 
@@ -333,7 +335,7 @@ The Zerodha client ID (e.g. `BT2632`) is the same as the username. No separate e
 - Segment dropdown: `select` — native HTML `<select>` element, only one on the page
   - Values: `EQ` (Equity, default), `FO` (Futures and Options), `CDS`, `COM`, `MF`, `EQX`, `MFX`
   - Switched via JS: `sel.value = 'FO'; sel.dispatchEvent(new Event('change', {bubbles: true}))` — Rod's `MustSelect` matches by text not value
-  - No action needed for EQ — it's the default on fresh navigation
+  - **Must reset to EQ after fresh navigation** — SPA remembers last-selected segment across `MustNavigate` calls
 - Date range input (opens picker): `div.three input`
 - Clear date selection: `span.mx-clear-wrapper`
 - Preset buttons (visible after opening picker):
@@ -370,14 +372,22 @@ For each pane:
 - Year label selector: `{pane} a.mx-current-year` (not `a:nth-of-type(6)` as originally documented)
 - Day selector: `td[title="YYYY-MM-DD"]` — most reliable, use `date.Format("2006-01-02")`
 - **Fresh tradebook navigation per FY**: `DownloadTradesForFY` navigates to the tradebook URL before each download — Zerodha's SPA caches previous search results, so reusing the same page causes stale CSV links to be downloaded
-- **WaitRequestIdle after search**: After clicking the search button, `page.WaitRequestIdle(2s)` is used instead of `time.Sleep` — the search API must complete and Vue must re-render before checking for the CSV link. Without this, the stale results from the auto-loaded page are grabbed instead of fresh results. Set up the idle listener BEFORE clicking search (Rod requirement).
+- **Search result detection (Race + WaitRequestIdle)**: After clicking search, `WaitRequestIdle(3s)` ensures the API request completes, then `Race()` detects either the CSV link (`div.table-section a:nth-of-type(2)`) or "Report's empty" text (`ElementR("div", "[Rr]eport's empty")`). This dual positive-signal approach replaces the old CSV-timeout method, which returned false negatives when the search didn't trigger. Set up the idle listener BEFORE clicking search (Rod requirement). Note: Rod's `ElementR` regex runs in the browser (JavaScript) — use JS-compatible syntax, not Go's `(?i)`.
+- **Segment dropdown persists across navigations**: Zerodha's SPA remembers the last-selected segment even after `MustNavigate`. If FO was selected for the previous FY, the next fresh navigation still shows FO. Code explicitly resets to EQ after every fresh navigation, before opening the date picker.
 - 3s delay between FY downloads to avoid Zerodha rate limiting (reduced from 5s since fresh navigation adds its own delay)
 - Zerodha supports data from 2013-04-01 onwards (`not-before` attribute on datepicker)
 - **Post-login success detection**: Primary: wait for `a[href*="tradebook"]` (30s timeout) — only appears in the authenticated sidebar. Fallback: if that element isn't present (account type variation), check `page.Info().URL` contains `console.zerodha.com` — being on console confirms login succeeded. Raw URL polling during the redirect chain is unreliable; only check URL after 2FA is submitted.
-- **Segment dropdown**: Native `<select>` element on tradebook page. Switched via JS `dispatchEvent('change')` because Rod's `MustSelect` matches by option text (regex), not by value — `"FO"` wouldn't match `"Futures & Options"`. EQ is the default after fresh navigation — no interaction needed for EQ. Segment is switched AFTER the commit search (dates must be committed to Vue state first).
+- **Segment dropdown**: Native `<select>` element on tradebook page. Switched via JS `dispatchEvent('change')` because Rod's `MustSelect` matches by option text (regex), not by value — `"FO"` wouldn't match `"Futures & Options"`. EQ must be explicitly set after fresh navigation (SPA remembers last selection). Segment is switched AFTER the commit search (dates must be committed to Vue state first).
 - **Commit search pattern**: After setting dates in the date picker, always click the search button once (with default EQ segment) before switching segments. This commits the date range to Vue's internal state. Without this, the dropdown `change` event triggers a Vue auto-search with default/stale dates. Discovered via production bug: FO FY2023-24 download received FY2024-25 data because dates weren't committed.
 - **Single-loop multi-segment download**: One backward FY loop downloads both EQ and FO per FY in a single navigation. Each segment tracks its own historical boundary independently. F&O activity can exist without equity trades (e.g., covered calls).
 - **Year picker bidirectional navigation**: The year panel shows ~10 years. If the target year is ahead of the visible range, navigate forward (`a.mx-icon-next-year`); if behind, navigate backward (`a.mx-icon-last-year`). Up to 10 attempts. Previous code only navigated backward, which failed when the FO segment dropdown caused the year panel to show an older decade.
+- **Stale DOM race fix (FO hang root cause)**: After switching from EQ to FO, existing CSV links are marked `data-stale="true"`. `waitForSearchResults` uses `:not([data-stale])` CSS selector for non-EQ segments so the Race waits for Vue to re-render fresh results. Without this, the Race matched stale EQ links immediately, clicking them didn't trigger a download event, and `WaitDownload` blocked forever.
+- **Calendar date picker timeouts**: All `MustElement`/`MustElements` calls in `selectCalendarDate` use `page.Timeout(10s)` with error returns. Selector misses produce clear error messages instead of indefinite hangs.
+- **Critical JS evals with null-checks**: 4 JS `Eval` calls (segment dropdown reset, date picker open, commit search click, segment search click) include `if (!el) throw new Error(...)` null guards with Go error returns. Non-critical evals (body click, debug logging) are left as `MustEval`.
+- **Orphaned GUID cleanup**: When `os.Rename` fails after download, the GUID-named temp file is removed to prevent littering ~/Downloads.
+- **Error-resilient boundary detection**: When `DownloadTradesForFY` returns an error, 0-record results are synthesized for all requested segments so `consecutiveEmpty` increments and boundary detection continues correctly.
+- **CSV click/href via page-level JS**: All interactions with the CSV download link use `Page.Eval` with `document.querySelector(selector)` instead of `Element.MustEval` or `Element.MustClick`. This avoids three Rod quirks: (1) `Element.Eval` passes element as `this`, not as function arg — arrow functions `(el) => el.click()` get `el=undefined`; (2) `Element.MustClick` retries forever on obscured elements; (3) `Timeout(N).Element()` attaches deadline to returned element — subsequent `MustClick`/`MustEval` inherit and panic on expiry. Click errors return 0-record result gracefully.
+- **Simplified boundary detection**: No per-segment boundary tracking or user prompts. All segments are checked for every FY. Stop when ALL segments have 0 records for 2 consecutive FYs. No hard floor. Handles accounts where FO data exists only in older FYs (e.g., a few F&O trades years ago, recent activity is EQ-only).
 
 ## Adding a New Broker
 
@@ -427,16 +437,24 @@ All phases complete and verified in production:
 - build.sh ✅ Cross-platform build script (mac-m1, mac-intel, windows.exe → ~/Downloads)
 - ✅ Consistent first-run flow: browser always opens before credential prompts (all machines)
 - ✅ All three Zerodha 2FA methods supported: TOTP (auto-submit), SMS OTP (explicit submit), mobile app code (explicit submit)
-- ✅ Stale search results fixed: fresh navigation + commit search + WaitRequestIdle
+- ✅ Stale search results fixed: fresh navigation + commit search + WaitRequestIdle + Race detection
 - ✅ Multi-segment support: single FY loop downloads EQ+FO per FY with independent boundary detection
 - ✅ CSV naming includes segment: `ACCOUNT_EQ_FROM_TO.csv` / `ACCOUNT_FO_FROM_TO.csv`
 - ✅ Backward compatible: old-format files (no segment) treated as EQ
 - ✅ F&O segment dropdown verified on live tradebook page (FY2020-21 through FY2024-25)
 - ✅ Commit search pattern prevents stale-date bug when switching segments
 - ✅ Year picker bidirectional navigation (forward + backward through decades)
+- ✅ Segment dropdown reset to EQ after fresh navigation (SPA persists last selection)
+- ✅ Race-based result detection: CSV link vs "Report's empty" text (replaces CSV-timeout)
+- ✅ Verified on two accounts: BT2632 (user's account, EQ+FO), CI8364 (wife's account, EQ only, light trader)
+- ✅ Robustness hardening: stale DOM race fix, calendar timeouts, GUID cleanup, error-resilient boundary detection, CSV error logging, JS null-checks
+- ✅ Page-level JS for CSV click/href (avoids Element.Eval `this` binding quirk, MustClick hang, and timeout context inheritance)
+- ✅ Simplified boundary detection: all segments checked every FY, stop when all empty for 2 consecutive FYs, no prompts
 
 **Not yet tested (requires live run):**
+- Full end-to-end run with all robustness fixes (final binary built 2026-02-26 ~12:30). EQ downloads verified working in partial runs on CI8364. Need clean run from start to finish.
 - Subsequent run after N days: should re-download current FY only, skip all prior FYs. Logic is implemented and correct — `foundActiveFY=true` is set when skipping already-downloaded FYs, ensuring the historical boundary is correctly detected.
+- Full run on BT2632 (user's account, EQ+FO) — verifies FO download path works with actual FO data. Expected: ~5 EQ files + 1 FO file.
 
 ## Troubleshooting
 

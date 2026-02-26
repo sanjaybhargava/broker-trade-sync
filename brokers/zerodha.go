@@ -166,10 +166,33 @@ func (z *ZerodhaBroker) DownloadTradesForFY(fy FinancialYear, downloadDir string
 	// Rate-limit pause — Zerodha throttles rapid requests.
 	time.Sleep(3 * time.Second)
 
+	// Reset segment dropdown to EQ — Zerodha's SPA remembers the last-selected
+	// segment across navigations, so if the previous FY switched to FO it sticks.
+	// Must be EQ before opening the date picker and committing the search.
+	_, err := z.page.Eval(`() => {
+		const sel = document.querySelector('select');
+		if (!sel) throw new Error('segment dropdown not found');
+		if (sel.value !== 'EQ') {
+			sel.value = 'EQ';
+			sel.dispatchEvent(new Event('change', { bubbles: true }));
+		}
+	}`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to reset segment dropdown to EQ: %w", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+
 	// --- Date picker ---
 	// Opened via JS because Rod's MustClick() hangs on SVG elements (no geometry).
 	z.debugLog("opening date picker")
-	z.page.MustEval(`() => document.querySelector('.mx-input-wrapper').click()`)
+	_, err = z.page.Eval(`() => {
+		const el = document.querySelector('.mx-input-wrapper');
+		if (!el) throw new Error('date picker input wrapper not found');
+		el.click();
+	}`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open date picker: %w", err)
+	}
 	if err := z.page.MustElement(".mx-datepicker-popup").WaitVisible(); err != nil {
 		return nil, fmt.Errorf("date picker did not open: %w", err)
 	}
@@ -190,13 +213,34 @@ func (z *ZerodhaBroker) DownloadTradesForFY(fy FinancialYear, downloadDir string
 	}
 	time.Sleep(500 * time.Millisecond)
 
+	// Dismiss the date picker popup — it may still be visible after selecting
+	// both dates. If it overlays the search button, Rod's MustClick sends the
+	// click to the popup instead of the button. Clicking the body dismisses it.
+	z.page.MustEval(`() => document.body.click()`)
+	time.Sleep(500 * time.Millisecond)
+
+	// Log the date input value to verify the picker set the correct dates.
+	inputVal := z.page.MustEval(`() => {
+		const inputs = document.querySelectorAll('.mx-input-wrapper input');
+		return Array.from(inputs).map(i => i.value).join(' ~ ');
+	}`).String()
+	z.debugLog("date input after picker: %s", inputVal)
+
 	// --- Commit search: lock the date range into Vue state ---
-	// WaitRequestIdle listener must be set up BEFORE the click (Rod requirement).
-	waitCommit := z.page.Timeout(15*time.Second).WaitRequestIdle(2*time.Second, nil, nil, nil)
+	// Set up WaitRequestIdle BEFORE clicking (Rod requirement) to ensure the API
+	// request completes before we check results. Without this, the Race can match
+	// stale "Report's empty" from the page's auto-search.
+	waitCommit := z.page.Timeout(30*time.Second).WaitRequestIdle(3*time.Second, nil, nil, nil)
 	z.debugLog("commit search (locking date range)")
-	z.page.MustElement("div.one span").MustClick()
+	_, err = z.page.Eval(`() => {
+		const el = document.querySelector('div.one span');
+		if (!el) throw new Error('search button not found');
+		el.click();
+	}`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to click search button (commit search): %w", err)
+	}
 	waitCommit()
-	z.debugLog("date range committed")
 
 	// --- Download each segment ---
 	var results []*DownloadResult
@@ -204,10 +248,18 @@ func (z *ZerodhaBroker) DownloadTradesForFY(fy FinancialYear, downloadDir string
 		targetFilename := GenerateCSVFilename(accountNumber, fy, segment)
 		targetPath := filepath.Join(downloadDir, targetFilename)
 
-		// EQ results are already loaded from the commit search.
+		// EQ results come from the commit search (dropdown reset to EQ upfront).
 		// For other segments: switch dropdown and re-search with committed dates.
 		if segment != SegmentEQ {
 			z.debugLog("switching to segment %s", string(segment))
+
+			// Mark existing CSV links as stale before searching — after the FO search,
+			// we need to distinguish new results from leftover EQ results in the DOM.
+			// Vue re-renders the table section but we can't rely on timing alone.
+			z.page.MustEval(`() => {
+				document.querySelectorAll('div.table-section a').forEach(a => a.setAttribute('data-stale', 'true'));
+			}`)
+
 			z.page.MustEval(`(val) => {
 				const sel = document.querySelector('select');
 				sel.value = val;
@@ -215,66 +267,195 @@ func (z *ZerodhaBroker) DownloadTradesForFY(fy FinancialYear, downloadDir string
 			}`, string(segment))
 			time.Sleep(500 * time.Millisecond)
 
-			waitIdle := z.page.Timeout(15*time.Second).WaitRequestIdle(2*time.Second, nil, nil, nil)
+			waitIdle := z.page.Timeout(30*time.Second).WaitRequestIdle(3*time.Second, nil, nil, nil)
 			z.debugLog("searching for %s", string(segment))
-			z.page.MustElement("div.one span").MustClick()
+			_, searchErr := z.page.Eval(`() => {
+				const el = document.querySelector('div.one span');
+				if (!el) throw new Error('search button not found');
+				el.click();
+			}`)
+			if searchErr != nil {
+				return nil, fmt.Errorf("failed to click search button for %s: %w", string(segment), searchErr)
+			}
 			waitIdle()
-			z.debugLog("%s results loaded", string(segment))
 		}
 
-		// CSV link is absent when no trades exist for this segment/date range.
-		csvEl, err := z.page.Timeout(5 * time.Second).Element("div.table-section a:nth-of-type(2)")
+		// Wait for a definitive signal: CSV link (data) or "report is empty" (no data).
+		// For non-EQ segments, excludeStale=true makes the Race skip links marked
+		// data-stale, waiting for Vue to re-render fresh results instead.
+		excludeStale := segment != SegmentEQ
+		hasData, err := z.waitForSearchResults(30*time.Second, excludeStale)
 		if err != nil {
+			z.debugLog("search results error for %s: %v", string(segment), err)
 			results = append(results, &DownloadResult{
 				Filename: targetFilename, RecordCount: 0, FY: fy, Segment: segment,
 			})
 			continue
 		}
 
-		// Rod saves downloads as <GUID> — WaitDownload blocks until fully written.
-		wait := z.browser.WaitDownload(downloadDir)
-		csvEl.MustClick()
-		info := wait()
-
-		downloadedPath := filepath.Join(downloadDir, info.GUID)
-		if err := os.Rename(downloadedPath, targetPath); err != nil {
-			z.debugLog("rename failed for %s: %v", string(segment), err)
+		if !hasData {
+			z.debugLog("no %s records for %s (report is empty)", string(segment), fy.Label)
 			results = append(results, &DownloadResult{
 				Filename: targetFilename, RecordCount: 0, FY: fy, Segment: segment,
 			})
 			continue
 		}
 
-		recordCount, _ := countCSVRecords(targetPath)
-		if recordCount == 0 {
-			os.Remove(targetPath)
+		z.debugLog("%s data found, downloading CSV", string(segment))
+
+		// Re-fetch the CSV element fresh (not tied to the Race's timeout context).
+		// For non-EQ segments, exclude stale links to avoid clicking leftover EQ links.
+		csvSelector := "div.table-section a:nth-of-type(2)"
+		if excludeStale {
+			csvSelector = "div.table-section a:nth-of-type(2):not([data-stale])"
 		}
-		results = append(results, &DownloadResult{
-			Filename: targetFilename, RecordCount: recordCount, FY: fy, Segment: segment,
+		// Verify element exists with timeout. We don't use the returned element
+		// because Rod attaches the timeout context to it — MustClick/MustEval
+		// on that element can panic after the deadline expires.
+		if _, csvElErr := z.page.Timeout(10 * time.Second).Element(csvSelector); csvElErr != nil {
+			z.debugLog("CSV element not found for %s after Race matched: %v", string(segment), csvElErr)
+			results = append(results, &DownloadResult{
+				Filename: targetFilename, RecordCount: 0, FY: fy, Segment: segment,
+			})
+			continue
+		}
+
+		// Log the CSV link href for debugging (non-fatal, page-level JS).
+		rod.Try(func() {
+			href := z.page.MustEval(`(sel) => {
+				const el = document.querySelector(sel);
+				return el ? el.href : 'not found';
+			}`, csvSelector).String()
+			z.debugLog("CSV link href: %s", href)
 		})
+
+		// Click the CSV link via page-level JS — avoids two Rod quirks:
+		// 1. Element.MustEval passes the element as `this`, not as a function arg —
+		//    arrow functions `(el) => el.click()` get el=undefined
+		// 2. Element.MustClick retries indefinitely if element is obscured
+		wait := z.browser.WaitDownload(downloadDir)
+		_, clickErr := z.page.Eval(`(sel) => {
+			const el = document.querySelector(sel);
+			if (!el) throw new Error('CSV link not found: ' + sel);
+			el.click();
+		}`, csvSelector)
+		if clickErr != nil {
+			z.debugLog("failed to click CSV link for %s: %v", string(segment), clickErr)
+			results = append(results, &DownloadResult{
+				Filename: targetFilename, RecordCount: 0, FY: fy, Segment: segment,
+			})
+			continue
+		}
+
+		type dlInfo struct {
+			guid string
+		}
+		dlCh := make(chan dlInfo, 1)
+		go func() {
+			info := wait()
+			dlCh <- dlInfo{guid: info.GUID}
+		}()
+
+		select {
+		case dl := <-dlCh:
+			downloadedPath := filepath.Join(downloadDir, dl.guid)
+			if err := os.Rename(downloadedPath, targetPath); err != nil {
+				z.debugLog("rename failed for %s: %v", string(segment), err)
+				// Clean up the GUID-named temp file so it doesn't litter ~/Downloads
+				os.Remove(downloadedPath)
+				results = append(results, &DownloadResult{
+					Filename: targetFilename, RecordCount: 0, FY: fy, Segment: segment,
+				})
+				continue
+			}
+
+			recordCount, csvErr := countCSVRecords(targetPath)
+			if csvErr != nil {
+				z.debugLog("error counting CSV records for %s: %v", targetFilename, csvErr)
+			}
+			if recordCount == 0 {
+				os.Remove(targetPath)
+			}
+			results = append(results, &DownloadResult{
+				Filename: targetFilename, RecordCount: recordCount, FY: fy, Segment: segment,
+			})
+		case <-time.After(30 * time.Second):
+			z.debugLog("download timed out for %s %s — CSV click may not have triggered download", string(segment), fy.Label)
+			results = append(results, &DownloadResult{
+				Filename: targetFilename, RecordCount: 0, FY: fy, Segment: segment,
+			})
+		}
 	}
 
 	return results, nil
+}
+
+// waitForSearchResults races two positive signals to determine search outcome:
+//   - CSV download link appears → data exists (return true)
+//   - "report is empty" text appears → no data (return false)
+//
+// When excludeStale is true, the CSS selector skips links marked data-stale="true"
+// (set before switching segments), so the Race waits for Vue to re-render fresh
+// results instead of matching leftover EQ links. This fixes the root cause of the
+// FO download hang: stale EQ CSV links matched immediately, and clicking them
+// didn't trigger a download event, so WaitDownload blocked forever.
+func (z *ZerodhaBroker) waitForSearchResults(timeout time.Duration, excludeStale bool) (bool, error) {
+	hasData := false
+
+	csvSelector := "div.table-section a:nth-of-type(2)"
+	if excludeStale {
+		csvSelector = "div.table-section a:nth-of-type(2):not([data-stale])"
+	}
+
+	race := z.page.Timeout(timeout).Race()
+	race.Element(csvSelector).Handle(func(e *rod.Element) error {
+		hasData = true
+		return nil
+	})
+	race.ElementR("div", "[Rr]eport's empty").Handle(func(e *rod.Element) error {
+		hasData = false
+		return nil
+	})
+
+	if _, err := race.Do(); err != nil {
+		return false, fmt.Errorf("search did not produce results within %v: %w", timeout, err)
+	}
+
+	z.debugLog("search result: hasData=%v", hasData)
+	return hasData, nil
 }
 
 // selectCalendarDate navigates the vue2-datepicker range picker to a specific date.
 // pane: 1=left (From), 2=right (To). Flow: year label → year → month → day.
 // The year panel shows ~10 years at a time; if the target year isn't visible,
 // the picker navigates forward or backward by decade until found.
+// All selector lookups use a 10s timeout to avoid indefinite hangs.
 func (z *ZerodhaBroker) selectCalendarDate(pane int, date time.Time) error {
 	paneSelector := fmt.Sprintf("div.mx-range-wrapper > div:nth-of-type(%d)", pane)
+	calTimeout := 10 * time.Second
 
 	z.debugLog("pane %d: selecting year %d", pane, date.Year())
-	z.page.MustElement(paneSelector + " a.mx-current-year").MustClick()
+	yearLabel, err := z.page.Timeout(calTimeout).Element(paneSelector + " a.mx-current-year")
+	if err != nil {
+		return fmt.Errorf("pane %d: year label not found: %w", pane, err)
+	}
+	yearLabel.MustClick()
 	time.Sleep(300 * time.Millisecond)
 
 	targetYear := date.Year()
 	for attempt := 0; attempt < 10; attempt++ {
-		spans := z.page.MustElements(paneSelector + " .mx-panel-year span")
+		spans, err := z.page.Timeout(calTimeout).Elements(paneSelector + " .mx-panel-year span")
+		if err != nil {
+			return fmt.Errorf("pane %d: year panel spans not found: %w", pane, err)
+		}
 		found := false
 		minYear, maxYear := 9999, 0
 		for _, span := range spans {
-			y, _ := strconv.Atoi(strings.TrimSpace(span.MustText()))
+			text, err := span.Text()
+			if err != nil {
+				continue
+			}
+			y, _ := strconv.Atoi(strings.TrimSpace(text))
 			if y == targetYear {
 				span.MustClick()
 				found = true
@@ -291,24 +472,43 @@ func (z *ZerodhaBroker) selectCalendarDate(pane int, date time.Time) error {
 			break
 		}
 		if attempt == 9 {
-			return fmt.Errorf("year %d not found in date picker", targetYear)
+			return fmt.Errorf("year %d not found in date picker after 10 attempts", targetYear)
 		}
 		if targetYear > maxYear {
-			z.page.MustElement(paneSelector + " .mx-calendar-header a.mx-icon-next-year").MustClick()
+			navBtn, err := z.page.Timeout(calTimeout).Element(paneSelector + " .mx-calendar-header a.mx-icon-next-year")
+			if err != nil {
+				return fmt.Errorf("pane %d: next-year button not found: %w", pane, err)
+			}
+			navBtn.MustClick()
 		} else {
-			z.page.MustElement(paneSelector + " .mx-calendar-header a.mx-icon-last-year").MustClick()
+			navBtn, err := z.page.Timeout(calTimeout).Element(paneSelector + " .mx-calendar-header a.mx-icon-last-year")
+			if err != nil {
+				return fmt.Errorf("pane %d: prev-year button not found: %w", pane, err)
+			}
+			navBtn.MustClick()
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
 	time.Sleep(300 * time.Millisecond)
 
-	// Click the target month span (1=Jan, 4=Apr, 3=Mar, etc.)
+	// Click the target month (1=Jan, 4=Apr, 3=Mar, etc.)
 	month := int(date.Month())
-	z.page.MustElement(fmt.Sprintf(paneSelector+" .mx-panel-month span:nth-of-type(%d)", month)).MustClick()
+	z.debugLog("pane %d: selecting month %d", pane, month)
+	monthEl, err := z.page.Timeout(calTimeout).Element(fmt.Sprintf(paneSelector+" .mx-panel-month span:nth-of-type(%d)", month))
+	if err != nil {
+		return fmt.Errorf("pane %d: month %d not found: %w", pane, month, err)
+	}
+	monthEl.MustClick()
 	time.Sleep(300 * time.Millisecond)
 
-	// Click the day cell by its title attribute (format: YYYY-MM-DD) — unambiguous
-	z.page.MustElement(fmt.Sprintf(`td[title="%s"]`, date.Format("2006-01-02"))).MustClick()
+	// Click the day cell by title attribute (YYYY-MM-DD) — unambiguous
+	dayTitle := date.Format("2006-01-02")
+	z.debugLog("pane %d: clicking day td[title=%q]", pane, dayTitle)
+	dayEl, err := z.page.Timeout(calTimeout).Element(fmt.Sprintf(`td[title="%s"]`, dayTitle))
+	if err != nil {
+		return fmt.Errorf("pane %d: day %s not found: %w", pane, dayTitle, err)
+	}
+	dayEl.MustClick()
 	return nil
 }
 
