@@ -148,7 +148,7 @@ func downloadAllSegments(broker brokers.Broker, downloadDir string, accountNumbe
 	// Load already-downloaded FYs per segment for idempotency
 	downloaded := make(map[brokers.Segment]map[string]string)
 	for _, seg := range segments {
-		dl, err := brokers.GetDownloadedFYs(downloadDir, seg)
+		dl, err := brokers.GetDownloadedFYs(downloadDir, accountNumber, seg)
 		if err != nil {
 			log.Printf("Failed to scan downloads for %s: %v", string(seg), err)
 			dl = make(map[string]string)

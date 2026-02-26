@@ -178,9 +178,9 @@ func parseDates(startStr, endStr string) (*FinancialYear, error) {
 }
 
 // GetDownloadedFYs scans the downloads directory and returns a map of already downloaded FYs
-// for the specified segment. Key is the FY label (e.g., "FY2023-24"), value is the filename.
+// for the specified account and segment. Key is the FY label (e.g., "FY2023-24"), value is the filename.
 // Old-format files (no segment) are treated as EQ.
-func GetDownloadedFYs(downloadDir string, segment Segment) (map[string]string, error) {
+func GetDownloadedFYs(downloadDir string, accountNumber string, segment Segment) (map[string]string, error) {
 	downloaded := make(map[string]string)
 	pattern := filepath.Join(downloadDir, "*.csv")
 	files, err := filepath.Glob(pattern)
@@ -188,11 +188,11 @@ func GetDownloadedFYs(downloadDir string, segment Segment) (map[string]string, e
 		return nil, fmt.Errorf("failed to scan downloads directory: %w", err)
 	}
 	for _, file := range files {
-		fy, _, fileSeg, err := ParseFYFromFilename(file)
+		fy, fileAccount, fileSeg, err := ParseFYFromFilename(file)
 		if err != nil {
 			continue
 		}
-		if fileSeg == segment {
+		if fileAccount == accountNumber && fileSeg == segment {
 			downloaded[fy.Label] = filepath.Base(file)
 		}
 	}
