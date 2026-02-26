@@ -333,54 +333,65 @@ func (z *ZerodhaBroker) DownloadTradesForFY(fy FinancialYear, downloadDir string
 		// 1. Element.MustEval passes the element as `this`, not as a function arg —
 		//    arrow functions `(el) => el.click()` get el=undefined
 		// 2. Element.MustClick retries indefinitely if element is obscured
-		wait := z.browser.WaitDownload(downloadDir)
-		_, clickErr := z.page.Eval(`(sel) => {
-			const el = document.querySelector(sel);
-			if (!el) throw new Error('CSV link not found: ' + sel);
-			el.click();
-		}`, csvSelector)
-		if clickErr != nil {
-			z.debugLog("failed to click CSV link for %s: %v", string(segment), clickErr)
-			results = append(results, &DownloadResult{
-				Filename: targetFilename, RecordCount: 0, FY: fy, Segment: segment,
-			})
-			continue
-		}
+		//
+		// Retry once on download timeout — the JS click handler occasionally
+		// doesn't fire on the first attempt (intermittent Zerodha SPA issue).
+		const maxDownloadAttempts = 2
+		var downloaded bool
+		for attempt := 1; attempt <= maxDownloadAttempts; attempt++ {
+			wait := z.browser.WaitDownload(downloadDir)
+			_, clickErr := z.page.Eval(`(sel) => {
+				const el = document.querySelector(sel);
+				if (!el) throw new Error('CSV link not found: ' + sel);
+				el.click();
+			}`, csvSelector)
+			if clickErr != nil {
+				z.debugLog("failed to click CSV link for %s: %v", string(segment), clickErr)
+				break
+			}
 
-		type dlInfo struct {
-			guid string
-		}
-		dlCh := make(chan dlInfo, 1)
-		go func() {
-			info := wait()
-			dlCh <- dlInfo{guid: info.GUID}
-		}()
+			type dlInfo struct {
+				guid string
+			}
+			dlCh := make(chan dlInfo, 1)
+			go func() {
+				info := wait()
+				dlCh <- dlInfo{guid: info.GUID}
+			}()
 
-		select {
-		case dl := <-dlCh:
-			downloadedPath := filepath.Join(downloadDir, dl.guid)
-			if err := os.Rename(downloadedPath, targetPath); err != nil {
-				z.debugLog("rename failed for %s: %v", string(segment), err)
-				// Clean up the GUID-named temp file so it doesn't litter ~/Downloads
-				os.Remove(downloadedPath)
+			select {
+			case dl := <-dlCh:
+				downloadedPath := filepath.Join(downloadDir, dl.guid)
+				if err := os.Rename(downloadedPath, targetPath); err != nil {
+					z.debugLog("rename failed for %s: %v", string(segment), err)
+					os.Remove(downloadedPath)
+					break
+				}
+
+				recordCount, csvErr := countCSVRecords(targetPath)
+				if csvErr != nil {
+					z.debugLog("error counting CSV records for %s: %v", targetFilename, csvErr)
+				}
+				if recordCount == 0 {
+					os.Remove(targetPath)
+				}
 				results = append(results, &DownloadResult{
-					Filename: targetFilename, RecordCount: 0, FY: fy, Segment: segment,
+					Filename: targetFilename, RecordCount: recordCount, FY: fy, Segment: segment,
 				})
-				continue
+				downloaded = true
+			case <-time.After(30 * time.Second):
+				if attempt < maxDownloadAttempts {
+					z.debugLog("download timed out for %s %s (attempt %d/%d) — retrying click", string(segment), fy.Label, attempt, maxDownloadAttempts)
+				} else {
+					z.debugLog("download timed out for %s %s (attempt %d/%d) — giving up", string(segment), fy.Label, attempt, maxDownloadAttempts)
+				}
 			}
 
-			recordCount, csvErr := countCSVRecords(targetPath)
-			if csvErr != nil {
-				z.debugLog("error counting CSV records for %s: %v", targetFilename, csvErr)
+			if downloaded {
+				break
 			}
-			if recordCount == 0 {
-				os.Remove(targetPath)
-			}
-			results = append(results, &DownloadResult{
-				Filename: targetFilename, RecordCount: recordCount, FY: fy, Segment: segment,
-			})
-		case <-time.After(30 * time.Second):
-			z.debugLog("download timed out for %s %s — CSV click may not have triggered download", string(segment), fy.Label)
+		}
+		if !downloaded {
 			results = append(results, &DownloadResult{
 				Filename: targetFilename, RecordCount: 0, FY: fy, Segment: segment,
 			})
