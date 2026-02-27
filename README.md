@@ -59,7 +59,7 @@ go run . --broker=zerodha
 2. Opens browser, prompts for TOTP/SMS OTP/mobile app code at login (never stored)
 3. Starts from current financial year, goes backward FY by FY
 4. Downloads both Equity and F&O CSVs for each FY that has trades
-5. Stops each segment independently when it finds a FY with no trading activity
+5. Stops automatically when all segments have no trades for 2 consecutive FYs
 
 ### Subsequent Runs
 1. Loads credentials silently from `.env`
@@ -90,6 +90,7 @@ broker-trade-sync/
 │   ├── broker.go        # Broker interface, FY helpers, registry
 │   └── zerodha.go       # Zerodha implementation
 ├── main.go              # CLI entry point, download loop, summary
+├── build.sh             # Cross-platform build script
 ├── .env                 # Saved credentials (gitignored)
 ├── .env.example         # Credential template
 ├── CLAUDE.md            # Developer/AI assistant guide
@@ -117,5 +118,5 @@ See `brokers/zerodha.go` as a reference implementation.
 - **Login fails** — check credentials in `.env`; run `go run . --reset` to re-enter
 - **Wrong 2FA code** — type your code in the terminal (not the browser); for TOTP make sure your authenticator app is time-synced; for SMS OTP check your registered mobile number; for mobile app code open the Zerodha app
 - **Download hangs** — run with `--headless=false` to watch the browser
-- **No records found** — your account may not have trades in recent FYs; the bot will ask before checking further back
+- **No records found** — your account may not have trades in recent FYs; the bot automatically stops after 2 consecutive empty FYs across all segments
 - **Rate limited** — Zerodha may block repeated requests; wait a few minutes and re-run (already-downloaded FYs are skipped automatically)
